@@ -1,54 +1,69 @@
-<div align="center">
+# RhinoMCP2
 
-<img src="art/logo.svg" alt="Rhino MCP" width="180" />
+MCP (Model Context Protocol) server enabling AI agents to create and edit Rhino 3D models programmatically. Runs inside Rhino as a plugin, exposes 25 tools via MCP protocol.
 
-# Rhino MCP Platform
+Fork of a McNeel repository with local modifications. Low maintenance priority — its main job here is serving as the AI test harness for plugin development. Sync upstream periodically to pick up fixes.
 
-**A Rhino MCP Server for AI Agents to create and edit Rhino.**
+## What It Does
 
-</div>
+AI agents (Claude, OpenHands) send MCP tool calls → plugin executes inside Rhino → returns geometry data, viewport images, command results.
 
----
+**25 tools:** geometry queries, viewport capture, Rhino commands, C#/Python scripting, Grasshopper 1 component management, Grasshopper 2 solving.
 
-# Getting Started
+## Tech Stack
 
-## Installing
+| Component | Technology |
+|-----------|-----------|
+| Plugin | C# .NET 8.0, Rhino SDK 8.29+, Grasshopper 8.29+ |
+| Protocol | MCP (stdio-based), ModelContextProtocol 1.2.0 |
+| Router | .NET 8.0 CLI (spawns/manages multiple Rhino instances) |
+| Distribution | .yak package (Rhino Package Manager) |
+| Platforms | Windows (framework-dependent) + macOS (NativeAOT) |
 
-Rhino MCP Platform can be installed without building source code.
+## Project Structure
 
-1. Run `PackageManager` in Rhino
-2. Search Rhino-MCP-Platform
-3. Install
-4. Skip to [Using](https://github.com/mcneel/RhinoMCP#using)
+```
+RhinoMCP2/
+├── rhino/
+│   ├── plugin/                  Rhino .rhp plugin
+│   │   ├── McpServer.cs         MCP server initialization
+│   │   ├── Plugin.cs            Plugin entry point
+│   │   └── Tools/ (25 classes)  MCP tool implementations
+│   └── router/                  CLI app for multi-instance management
+│       └── codegen/             Source generator for router proxy tools
+├── cc-plugin/                   Claude Code plugin configuration
+└── connector/                   MCP connector for Claude Desktop (.mcpb)
+```
 
-## Building & Debugging
+## Tool Categories
 
-Use Run and Debug from within VSCode to build, launch Rhino and start the MCP Server all in one click.
+| Category | Tools | Purpose |
+|----------|-------|---------|
+| Geometry | GetSelection, ListObjects, SetSelection, ProbeIntersection | Query/select objects |
+| Viewport | GetViewportImage, SetCamera, ZoomToLayer/Object | Visual inspection |
+| Commands | RunCommand, GetCommands | Execute Rhino commands |
+| Scripting | RunCSharp, RunPython | Execute code inside Rhino |
+| Grasshopper 1 | 7 tools | Canvas management, component placement, solving |
+| Grasshopper 2 | 2 tools | Solving and execution |
 
-## Using
+## Relationship to Other Projects
 
-1. Open up your AI Agent, in this case we'll use Claude.
-2. Run the RhinoMCPConnect command and copy that into your AI Agent
-3. You may need to restart your AI chat session
-4. Close Rhino, or run the RhinoMCP command
-5. Confirm by asking your agent to create a box in Rhino.
+| Project | Relationship |
+|---------|-------------|
+| **buildeer** | Can expose buildeer smart objects and recipes to AI agents |
+| **OpenHands** | Configured as MCP server in OpenHands Docker (port 10500) |
+| **LifeOS** | Parallel MCP effort — same pattern, different domain |
+| **BuildeerUniCore** | Math library could be exposed via tools for geometric computation |
 
-https://github.com/user-attachments/assets/9b1cd938-3995-4eec-ab42-d62bf67b13f2
+## Reuse & Sharing Opportunities
 
-### Options
+- **MCP server pattern** is reusable for any application needing AI agent integration
+- **Router architecture** (spawn/manage multiple instances) applicable to other heavy desktop apps
+- **Source generator** for proxy tools could be generalized
 
-The router accepts `--default-version <ver>` (or `-v <ver>`) to pick which installed Rhino to launch. Defaults to `8`; pass `9` for Rhino 9 WIP.
+## Notes
 
-## Issues?
-
-Q: My MCP client can't find the router.
-
-A: Make sure Rhino-MCP-Platform is installed via Rhino's PackageManager, and double-check the path to `rhino-mcp-router` in your MCP client config.
-
-# Getting Help
-
-Ask questions, post discussions and ideas to the [Rhino Discourse forums](https://discourse.mcneel.com/c/rhino/artificial-intelligence-rhino/162).
-
-# What can an MCP Server do?
-
-MCP Servers are a new way of controlling your programs. They let you control Rhino but using written human language. You can ask about the model, have your AI agent create things in the model, or organise it for you. The capabilities are endless.
+- Plugin loaded via PackageManager in Rhino
+- ASP.NET Core 8.0 framework bundled in plugin output (avoids system .NET dependency)
+- Stale slot error after Rhino restart (auto-reconnects on retry)
+- TODO: port check before startup, macOS crash reports, fallback registry-based Rhino lookup
