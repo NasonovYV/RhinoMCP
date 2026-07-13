@@ -10,16 +10,17 @@ namespace RhMcp.Router;
 // Plugin runs its MCP server with `Stateless = true`, so no initialize handshake is required —
 // each tool call is a self-contained JSON-RPC POST.
 //
-// Results are wrapped in a ReturnResult envelope (payload/error/autoSpawnedSlot). The lone
-// exception is `get_viewport_image`: its binary content block is passed through verbatim
-// to avoid a base64 round-trip.
+// Results are wrapped in a ReturnResult envelope (payload/error/autoSpawnedSlot). The
+// exceptions are `get_viewport_image` and `get_panel_image`: their binary content blocks
+// are passed through verbatim to avoid a base64 round-trip.
 public class ProxyDispatcher(
     RhinoManager manager,
     IHttpClientFactory httpFactory,
     RhinoCrashReportFinder crashFinder,
     ILogger<ProxyDispatcher> log)
 {
-    private const string ViewportImageToolName = "get_viewport_image";
+    private static readonly HashSet<string> BinaryPassThroughTools =
+        new(StringComparer.Ordinal) { "get_viewport_image", "get_panel_image" };
 
     public async Task<string> CallToolAsync(
         string? slotId,
@@ -138,7 +139,7 @@ public class ProxyDispatcher(
                 JsonElement resultElement = ExtractMcpResult(responseBody, child.SlotId, toolName);
 
                 // Binary content block — pass through verbatim, bypassing the envelope.
-                if (toolName == ViewportImageToolName)
+                if (BinaryPassThroughTools.Contains(toolName))
                 {
                     return resultElement.GetRawText();
                 }

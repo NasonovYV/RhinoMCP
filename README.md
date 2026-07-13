@@ -1,6 +1,6 @@
 # RhinoMCP2
 
-MCP (Model Context Protocol) server enabling AI agents to create and edit Rhino 3D models programmatically. Runs inside Rhino as a plugin, exposes 25 tools via MCP protocol.
+MCP (Model Context Protocol) server enabling AI agents to create and edit Rhino 3D models programmatically. Runs inside Rhino as a plugin, exposes ~45 tools via MCP protocol.
 
 Fork of a McNeel repository with local modifications. Low maintenance priority — its main job here is serving as the AI test harness for plugin development. Sync upstream periodically to pick up fixes.
 
@@ -8,7 +8,7 @@ Fork of a McNeel repository with local modifications. Low maintenance priority �
 
 AI agents (Claude, OpenHands) send MCP tool calls → plugin executes inside Rhino → returns geometry data, viewport images, command results.
 
-**25 tools:** geometry queries, viewport capture, Rhino commands, C#/Python scripting, Grasshopper 1 component management, Grasshopper 2 solving.
+**~45 tools:** geometry queries, viewport capture, Rhino commands, C#/Python scripting, panel UI testing (Blazor Hybrid panels — local fork addition), Grasshopper 1/2 component management and solving.
 
 ## Tech Stack
 
@@ -39,12 +39,14 @@ RhinoMCP2/
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
-| Geometry | GetSelection, ListObjects, SetSelection, ProbeIntersection | Query/select objects |
+| Geometry | GetSelection, ListObjects, SetSelection | Query/select objects |
 | Viewport | GetViewportImage, SetCamera, ZoomToLayer/Object | Visual inspection |
 | Commands | RunCommand, GetCommands | Execute Rhino commands |
 | Scripting | RunCSharp, RunPython | Execute code inside Rhino |
-| Grasshopper 1 | 7 tools | Canvas management, component placement, solving |
-| Grasshopper 2 | 2 tools | Solving and execution |
+| Documents | OpenDoc, SaveDoc, CloseDoc, GetContext | Document lifecycle (upstream v2) |
+| Panels (local) | ListPanels, EvalInPanel, GetPanelImage | Blazor Hybrid panel UI testing: discover panels, drive/read the DOM, capture PNG |
+| Grasshopper 1 | 11 tools | Canvas management, component placement, solving |
+| Grasshopper 2 | 11 tools | Canvas management, component placement, solving |
 
 ## Relationship to Other Projects
 

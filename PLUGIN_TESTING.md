@@ -18,15 +18,17 @@ Add this `.mcp.json` to the plugin project root:
   "mcpServers": {
     "rhino-mcp-router-dev": {
       "type": "stdio",
-      "command": "D:\\Tech\\RhinoMCP2\\rhino\\router\\bin\\Debug\\net8.0\\win-x64\\publish\\rhino-mcp-router.exe",
+      "command": "D:\\Tech\\RhinoMCP2\\rhino\\router\\bin\\R9\\Debug\\net8.0\\win-x64\\rhino-mcp-router.exe",
       "args": ["--default-version", "WIP"],
       "env": {
-        "RHINO_PACKAGE_DIRS": "D:\\Tech\\RhinoMCP2\\rhino\\plugin\\bin\\Debug"
+        "RHINO_PACKAGE_DIRS": "D:\\Tech\\RhinoMCP2\\rhino\\plugin\\bin\\R9-win\\Debug"
       }
     }
   }
 }
 ```
+
+(Paths are for the upstream-v2 layout: output dirs are split by Rhino target — `bin/R9/...` for the router, `bin/R9-win/...` for the plugin — and the router exe comes straight from `dotnet build`, no separate publish step.)
 
 Then open a Claude Code chat from that plugin's folder. No access to `D:\Tech\RhinoMCP2` is needed — the MCP tools are available via the router binary.
 
@@ -129,17 +131,34 @@ _-Box 0,0,0 10,10,10
 
 Use `get_viewport_image` MCP tool with view/displayMode params.
 
+### Step 8: Panel UI testing (Blazor Hybrid / Flimt panels)
+
+Plugins whose panels are Blazor-in-WebView2 (everything built on Flimt.Rhino.UI) can be
+driven at the DOM level:
+
+1. `list_panels` — find the panel's GUID, caption, type, and open state (the owning
+   plugin must be loaded first, see Step 2).
+2. `eval_in_panel` — run JavaScript in the panel's WebView2: read text
+   (`document.body.innerText`), query the DOM, click buttons (`el.click()`), fill
+   inputs (set `value`, then dispatch `new Event('input', {bubbles: true})` so Blazor
+   notices). Returns the JSON-encoded result of the expression.
+3. `get_panel_image` — capture the panel's web content as PNG when layout/theme is
+   the question; prefer `eval_in_panel` text assertions when it isn't.
+
 ---
 
 ## Available MCP Tools
 
 | Tool | Purpose |
 |------|---------|
-| `run_csharp` | Execute C# in Rhino process (reflection, .NET API) |
+| `run_csharp` | Execute C# in Rhino process (reflection, .NET API) — param is `script` |
 | `run_python` | Execute Python in Rhino process |
 | `run_command` | Run any Rhino command string |
 | `list_objects` | Query objects by type/layer/name |
 | `get_viewport_image` | Capture viewport as JPG |
+| `list_panels` | Discover registered panels: GUID, caption, type, plugin, open state |
+| `eval_in_panel` | Run JavaScript in a Blazor Hybrid panel (read DOM, click, fill) |
+| `get_panel_image` | Capture a panel's web content as PNG |
 | `list_slots` | See running Rhino instances |
 | `spawn_slot` | Launch additional Rhino instances |
 
