@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.DependencyInjection;
@@ -6,9 +7,19 @@ using Microsoft.Extensions.Logging;
 using RhMcp.Router;
 using RhMcp.Router.Tools.Generated;
 
-var config = RouterConfig.FromArgs(args);
+RouterConfig config = RouterConfig.FromArgs(args);
 
-var builder = Host.CreateApplicationBuilder(args);
+// Derived from the single source <Version> in rhino/Directory.Build.props (via
+// the assembly's informational version). Strip any SourceLink "+<git-hash>"
+// build-metadata suffix so ServerInfo reports a clean "0.1.3". The attribute is
+// always emitted for a normally-built assembly; its absence is a broken build, so
+// fail fast rather than advertise a fake version.
+string informationalVersion =
+    Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+    ?? throw new InvalidOperationException("router assembly missing InformationalVersion; check build config");
+string routerVersion = informationalVersion.Split('+')[0];
+
+HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
 
 // Stdio MCP servers must not log to stdout — that's the JSON-RPC channel.
 // Route all logging to stderr.
@@ -16,11 +27,12 @@ builder.Logging.ClearProviders();
 builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
 
 builder.Services.AddSingleton(config);
-builder.Services.AddSingleton<RhinoLocator>();
 builder.Services.AddSingleton<RhinoControlClient>();
 builder.Services.AddSingleton<RhinoCrashReportFinder>();
+builder.Services.AddSingleton<SlotStore>();
 builder.Services.AddSingleton<RhinoManager>();
 builder.Services.AddSingleton<ProxyDispatcher>();
+builder.Services.AddSingleton<RouterId>();
 builder.Services.AddHttpClient();
 
 // JsonSerializerOptions used by the MCP server for tool arg/return serialization.
@@ -28,11 +40,12 @@ builder.Services.AddHttpClient();
 // MCP layers its own context on top of whatever we pass in.
 var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
 jsonOptions.TypeInfoResolverChain.Insert(0, RouterJsonContext.Default);
+jsonOptions.Converters.Add(new LenientStringConverter());
 
 var mcpBuilder = builder.Services
     .AddMcpServer(o =>
     {
-        o.ServerInfo = new() { Name = "rhino-mcp-router", Version = "0.1.0" };
+        o.ServerInfo = new() { Name = "rhino-mcp-router", Version = routerVersion };
     })
     .WithStdioServerTransport();
 
@@ -42,6 +55,11 @@ var mcpBuilder = builder.Services
 RouterToolRegistrar.RegisterAll(mcpBuilder, jsonOptions);
 
 var host = builder.Build();
+
+// Adopt any user-started Rhinos that announced themselves before the router
+// came up. Cheap one-shot dir scan; later scans happen on every list_slots
+// and slot-less dispatch.
+host.Services.GetRequiredService<RhinoManager>().ScanAnnouncements();
 
 // Clean up child Rhinos when Claude Code closes the stdio connection.
 host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.Register(() =>

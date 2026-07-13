@@ -9,50 +9,88 @@ namespace RhMcp.Router;
 // Forwards MCP tool calls from this router to the specified child Rhino's HTTP MCP endpoint.
 // Plugin runs its MCP server with `Stateless = true`, so no initialize handshake is required —
 // each tool call is a self-contained JSON-RPC POST.
+//
+// Results are wrapped in a ReturnResult envelope (payload/error/autoSpawnedSlot). The lone
+// exception is `get_viewport_image`: its binary content block is passed through verbatim
+// to avoid a base64 round-trip.
 public class ProxyDispatcher(
     RhinoManager manager,
     IHttpClientFactory httpFactory,
     RhinoCrashReportFinder crashFinder,
     ILogger<ProxyDispatcher> log)
 {
+    private const string ViewportImageToolName = "get_viewport_image";
+
     public async Task<string> CallToolAsync(
         string? slotId,
         string toolName,
         JsonNode args,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? defaultVersionOverride = null)
     {
-        // Every exit path returns a string the MCP SDK forwards to the agent
-        // verbatim. The SDK swallows exception messages into a generic "An error
-        // occurred invoking '<tool>'", so on failure we MUST return a structured
-        // payload, not throw. The catch at the bottom of this method is the
-        // safety net for anything we didn't anticipate.
+        // `defaultVersionOverride` is set by codegen for tools that need a
+        // specific Rhino when no slot is passed (GH2_* tools pin "WIP" so they
+        // don't try to run on Rhino 8). It has no effect when `slotId` is set.
         ChildRhino? child = null;
+        SlotInfo? autoSpawnedSlot = null;
         try
         {
             // Null slot → use (or lazily create) the default Rhino. Lets agents
             // call `run_python(script=...)` etc. without a prior spawn_slot. Note
             // this can throw the same spawn-time exceptions SpawnSlotTool handles
             // (timeout, file-not-found, etc.); the outer catch translates them.
-            child = slotId is null
-                ? await manager.GetOrCreateDefaultAsync(ct).ConfigureAwait(false)
-                : manager.Get(slotId) ?? throw new SlotNotFoundException(slotId);
+            if (slotId is null)
+            {
+                (ChildRhino resolved, bool wasNewlySpawned) =
+                    await manager.GetOrCreateDefaultAsync(defaultVersionOverride, ct).ConfigureAwait(false);
+                child = resolved;
+                if (wasNewlySpawned)
+                {
+                    autoSpawnedSlot = new SlotInfo(
+                        SlotId: resolved.SlotId,
+                        Version: resolved.Version,
+                        Reason: $"Auto-spawned Rhino {resolved.Version} to serve '{toolName}' (no `slot` argument was passed and no matching Rhino was already running).");
+                }
+            }
+            else
+            {
+                child = manager.Get(slotId) ?? throw new SlotNotFoundException(slotId);
+                // Explicit slot whose Rhino version doesn't match what this tool
+                // needs (GH2_* tools pin "WIP"). Short-circuit before forwarding —
+                // the plugin would otherwise return a generic "unknown tool" MCP
+                // error and the agent wouldn't know the cause was a version mismatch.
+                if (defaultVersionOverride is not null && !VersionMatch.IsCompatible(child.Version, defaultVersionOverride))
+                {
+                    return WrapError(
+                        new ErrorInfo(
+                            Code: "wrong_rhino_version",
+                            Message: $"Tool '{toolName}' only works on Rhino {defaultVersionOverride} but slot '{slotId}' is running Rhino {child.Version}. " +
+                                $"Omit the `slot` argument to auto-spawn Rhino {defaultVersionOverride}, or call spawn_slot with version=\"{defaultVersionOverride}\"."),
+                        autoSpawnedSlot);
+                }
+            }
 
-            var requestId = Guid.NewGuid().ToString("N");
-            var rpc = new JsonRpcRequest(
+            // Make this the session's active slot so the next slot-less call
+            // sticks to it. Past the version gate, so an incompatible explicit
+            // slot can't become active.
+            manager.SetActiveSlot(child.SlotId);
+
+            string requestId = Guid.NewGuid().ToString("N");
+            JsonRpcRequest rpc = new(
                 Jsonrpc: "2.0",
                 Id: requestId,
                 Method: "tools/call",
                 Params: new JsonRpcRequestParams(Name: toolName, Arguments: args));
 
-            var json = JsonSerializer.Serialize(rpc, RouterJsonContext.Default.JsonRpcRequest);
+            string json = JsonSerializer.Serialize(rpc, RouterJsonContext.Default.JsonRpcRequest);
             log.LogDebug("Proxying tool '{Tool}' to slot '{Slot}' at {Endpoint}: {Body}",
                 toolName, slotId, child.Endpoint, json);
 
-            var http = httpFactory.CreateClient();
+            HttpClient http = httpFactory.CreateClient();
             http.Timeout = TimeSpan.FromMinutes(5); // some tool calls can run long Python scripts
 
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            using var request = new HttpRequestMessage(HttpMethod.Post, child.Endpoint + "/")
+            using StringContent content = new(json, Encoding.UTF8, "application/json");
+            using HttpRequestMessage request = new(HttpMethod.Post, child.Endpoint + "/")
             {
                 Content = content
             };
@@ -64,22 +102,32 @@ public class ProxyDispatcher(
             {
                 response = await http.SendAsync(request, HttpCompletionOption.ResponseContentRead, ct);
             }
-            catch (HttpRequestException ex) when (IsConnectionFailure(ex))
+            catch (HttpRequestException ex) when (SpawnDiagnostics.IsConnectionFailure(ex))
             {
+                // A clean shutdown leaves a departure tombstone; a crash doesn't.
+                // Check that first so a user closing the doc/Rhino mid-call isn't
+                // reported as a crash.
+                if (child.Pid is { } pid && child.Port is { } port && manager.TryConsumeDeparture(pid, port))
+                {
+                    log.LogInformation("Rhino slot '{Slot}' (pid {Pid}) was closed during tool call '{Tool}'",
+                        child.SlotId, child.Pid, toolName);
+                    return WrapClosed(child, toolName, callerSlotArg: slotId, autoSpawnedSlot);
+                }
+
                 // Connection-level failure — Rhino likely crashed. Confirm via
                 // pid + port probe so we don't shout "crashed" on a transient blip.
                 if (manager.TryReapDead(child.SlotId))
                 {
                     log.LogWarning(ex, "Rhino slot '{Slot}' (pid {Pid}) crashed during tool call '{Tool}'",
                         child.SlotId, child.Pid, toolName);
-                    return SerializePayload(BuildCrashPayload(child, toolName));
+                    return WrapCrash(child, toolName, callerSlotArg: slotId, autoSpawnedSlot);
                 }
                 throw;
             }
 
             using (response)
             {
-                var responseBody = await response.Content.ReadAsStringAsync(ct);
+                string responseBody = await response.Content.ReadAsStringAsync(ct);
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -87,7 +135,16 @@ public class ProxyDispatcher(
                         $"Child Rhino at {child.Endpoint} returned HTTP {(int)response.StatusCode}: {responseBody}");
                 }
 
-                return ExtractResult(responseBody, child.SlotId, toolName);
+                JsonElement resultElement = ExtractMcpResult(responseBody, child.SlotId, toolName);
+
+                // Binary content block — pass through verbatim, bypassing the envelope.
+                if (toolName == ViewportImageToolName)
+                {
+                    return resultElement.GetRawText();
+                }
+
+                JsonNode? payload = ExtractPayload(resultElement);
+                return new ReturnResult(payload, Error: null, AutoSpawnedSlot: autoSpawnedSlot).AsJson;
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -101,114 +158,100 @@ public class ProxyDispatcher(
         catch (Exception ex)
         {
             log.LogWarning(ex, "Tool call '{Tool}' (slot '{Slot}') failed", toolName, slotId ?? "(default)");
-            return SerializePayload(DiagnoseFailure(ex, child, toolName));
+            return WrapError(DiagnoseFailure(ex, toolName), autoSpawnedSlot);
         }
     }
 
-    private static string SerializePayload(SpawnErrorPayload p) =>
-        JsonSerializer.Serialize(p, RouterJsonContext.Default.SpawnErrorPayload);
+    private static string WrapError(ErrorInfo error, SlotInfo? autoSpawnedSlot) =>
+        new ReturnResult(Payload: null, Error: error, AutoSpawnedSlot: autoSpawnedSlot).AsJson;
 
-    private SpawnErrorPayload BuildCrashPayload(ChildRhino child, string toolName) =>
-        new(
-            Error: "rhino_crashed",
-            Message:
-                $"Rhino slot '{child.SlotId}' (pid {child.Pid}, Rhino {child.Version}) is no longer responding — likely crashed mid-call to '{toolName}'. " +
-                "The stale slot has been pruned. " +
-                (child.SlotId == RhinoManager.DefaultSlotId
-                    ? "Retry this call to auto-spawn a fresh default Rhino."
-                    : "Call spawn_slot to start a new one."),
-            CrashReport: crashFinder.TryFind(child.Pid));
-
-    // Translates anything that escaped the inner crash-detection branch into the
-    // same SpawnErrorPayload shape SpawnSlotTool emits. Codes are kebab-case so
-    // an agent can branch on them. Messages always end with what the agent
-    // should do next.
-    private SpawnErrorPayload DiagnoseFailure(Exception ex, ChildRhino? child, string toolName) => ex switch
+    private static string WrapClosed(ChildRhino child, string toolName, string? callerSlotArg, SlotInfo? autoSpawnedSlot)
     {
-        SlotNotFoundException snf => new(
-            "slot_not_found",
-            $"No slot named '{snf.SlotId}'. Call spawn_slot to create one, or list_slots to see what's running."),
+        // Auto-spawn path can just retry; an explicit slot needs a fresh spawn_slot.
+        string nextAction = callerSlotArg is null
+            ? "Retry this call to auto-spawn another Rhino."
+            : "Call spawn_slot to start a new one.";
+        string message =
+            $"Rhino slot '{child.SlotId}' (Rhino {child.Version}) was closed (its document or the Rhino window was closed) " +
+            $"during '{toolName}'. The slot has been pruned. " + nextAction;
+        return WrapError(new ErrorInfo(Code: "rhino_closed", Message: message), autoSpawnedSlot);
+    }
 
-        // The default-Rhino auto-spawn can fail before we ever talk to a child.
-        // Same exception shapes SpawnSlotTool handles; keep the messages in sync.
-        FileNotFoundException fnf => new(
-            "rhino_not_installed",
-            fnf.Message + " Tool call '" + toolName + "' aborted because the default Rhino couldn't be auto-spawned."),
+    private string WrapCrash(ChildRhino child, string toolName, string? callerSlotArg, SlotInfo? autoSpawnedSlot)
+    {
+        RhinoCrashReport? report = crashFinder.TryFind(child.Pid);
+        // Auto-spawn path can just retry; an explicit slot needs a fresh spawn_slot.
+        string nextAction = callerSlotArg is null
+            ? "Retry this call to auto-spawn another Rhino."
+            : "Call spawn_slot to start a new one.";
+        string message =
+            $"Rhino slot '{child.SlotId}' (pid {child.Pid}, Rhino {child.Version}) is no longer responding — likely crashed mid-call to '{toolName}'. " +
+            "The stale slot has been pruned. " + nextAction;
+        return WrapError(
+            new ErrorInfo(Code: "rhino_crashed", Message: message, CrashReportPath: report?.Path),
+            autoSpawnedSlot);
+    }
 
-        TimeoutException te => new(
-            "startup_timeout",
-            te.Message + " The Rhino window may be showing a license, EULA, or update dialog — check it. " +
-            "If the rh-mcp plugin isn't loaded, install it and retry."),
+    // Shared spawn-pipeline shapes route through SpawnDiagnostics (the default
+    // auto-spawn can fail before we ever talk to a child); this caller appends its
+    // tool-call next-action suffix. The arms below are tool-call-specific.
+    private ErrorInfo DiagnoseFailure(Exception ex, string toolName)
+    {
+        if (SpawnDiagnostics.TryClassify(ex, crashFinder, out SpawnDiagnostics.SpawnDiagnosis diag))
+        {
+            string suffix = diag.Code switch
+            {
+                "rhino_not_installed" => $" Tool call '{toolName}' aborted because the default Rhino couldn't be auto-spawned.",
+                "existing_rhino_unreachable" => " Retry the call.",
+                _ => "",
+            };
+            return new(diag.Code, diag.BaseMessage + suffix, diag.CrashReportPath);
+        }
 
-        PlatformNotSupportedException pne => new(
-            "unsupported_platform",
-            pne.Message),
+        return ex switch
+        {
+            SlotNotFoundException snf => new(
+                Code: "slot_not_found",
+                Message: $"No slot named '{snf.SlotId}'. Call spawn_slot to create one, or list_slots to see what's running."),
 
-        // HttpRequestException with a connection error here means an *existing*
-        // Rhino we were trying to reuse stopped responding (typically during the
-        // Mac _router_spawn_listener call inside GetOrCreateDefaultAsync).
-        HttpRequestException hre when IsConnectionFailure(hre) => new(
-            "existing_rhino_unreachable",
-            $"Tried to reach an existing Rhino to handle tool call '{toolName}' but it didn't respond " +
-            $"({hre.Message}). The Rhino likely crashed. Stale slot pruned — retry the call.",
-            crashFinder.TryFindMostRecent()),
+            // Non-connection HttpRequestException (HTTP 5xx from the plugin, etc.)
+            // Rhino is alive but the request failed. Surface the message.
+            HttpRequestException hre => new(
+                Code: "plugin_http_error",
+                Message: hre.Message),
 
-        // Non-connection HttpRequestException (HTTP 5xx from the plugin, etc.)
-        // — Rhino is alive but the request failed. Surface the message.
-        HttpRequestException hre => new(
-            "plugin_http_error",
-            hre.Message),
+            InvalidOperationException ioe => new(
+                Code: "tool_call_failed",
+                Message: ioe.Message),
 
-        InvalidOperationException ioe => new(
-            "tool_call_failed",
-            ioe.Message),
-
-        _ => new(
-            "unexpected",
-            $"{ex.GetType().Name}: {ex.Message}"),
-    };
+            _ => new(
+                Code: "unexpected",
+                Message: $"{ex.GetType().Name}: {ex.Message}"),
+        };
+    }
 
     private sealed class SlotNotFoundException(string slotId) : Exception($"No slot named '{slotId}'")
     {
         public string SlotId { get; } = slotId;
     }
 
-    // Detect transport-level failures (DNS, refused, reset, timeout) — these mean
-    // Rhino's listener isn't there to respond, not that Rhino responded with an
-    // error. .NET 8 exposes HttpRequestError; older causes (SocketException) are
-    // also unwrapped here for belt-and-braces.
-    private static bool IsConnectionFailure(HttpRequestException ex)
+    // Unwraps the MCP `result` element from either a bare JSON-RPC body or an SSE stream.
+    private static JsonElement ExtractMcpResult(string responseBody, string slotId, string toolName)
     {
-        if (ex.HttpRequestError == HttpRequestError.ConnectionError) return true;
-        if (ex.HttpRequestError == HttpRequestError.SecureConnectionError) return true;
-        for (var inner = ex.InnerException; inner is not null; inner = inner.InnerException)
-        {
-            if (inner is System.Net.Sockets.SocketException) return true;
-            if (inner is IOException) return true;
-        }
-        return false;
-    }
+        string trimmed = responseBody.TrimStart();
 
-    private static string ExtractResult(string responseBody, string slotId, string toolName)
-    {
-        // The plugin's Stateless HTTP transport returns either:
-        //   - A bare JSON-RPC object: {"jsonrpc":"2.0","id":"...","result":{...}}
-        //   - An SSE-style stream with one or more `data: <json>` lines (when the SDK chooses streaming).
-        // We handle both.
-        var payload = responseBody.TrimStart();
-
-        if (payload.StartsWith("event:") || payload.StartsWith("data:"))
+        if (trimmed.StartsWith("event:") || trimmed.StartsWith("data:"))
         {
             // Walk SSE lines, find the first `data:` payload, parse that.
-            foreach (var line in responseBody.Split('\n'))
+            foreach (string line in responseBody.Split('\n'))
             {
-                var trimmed = line.TrimEnd('\r');
-                if (trimmed.StartsWith("data:"))
+                string lineTrimmed = line.TrimEnd('\r');
+                if (lineTrimmed.StartsWith("data:"))
                 {
-                    var jsonPart = trimmed["data:".Length..].TrimStart();
+                    string jsonPart = lineTrimmed["data:".Length..].TrimStart();
                     if (!string.IsNullOrEmpty(jsonPart))
                     {
-                        return ExtractFromJsonRpc(jsonPart, slotId, toolName);
+                        return ExtractResultFromJsonRpc(jsonPart, slotId, toolName);
                     }
                 }
             }
@@ -216,26 +259,58 @@ public class ProxyDispatcher(
                 $"No `data:` payload in SSE response from slot '{slotId}' for tool '{toolName}': {responseBody}");
         }
 
-        return ExtractFromJsonRpc(responseBody, slotId, toolName);
+        return ExtractResultFromJsonRpc(responseBody, slotId, toolName);
     }
 
-    private static string ExtractFromJsonRpc(string rpcJson, string slotId, string toolName)
+    private static JsonElement ExtractResultFromJsonRpc(string rpcJson, string slotId, string toolName)
     {
-        using var doc = JsonDocument.Parse(rpcJson);
-        var root = doc.RootElement;
+        using JsonDocument doc = JsonDocument.Parse(rpcJson);
+        JsonElement root = doc.RootElement;
 
-        if (root.TryGetProperty("error", out var err))
+        if (root.TryGetProperty("error", out JsonElement err))
         {
             throw new InvalidOperationException(
                 $"Slot '{slotId}' tool '{toolName}' returned MCP error: {err.GetRawText()}");
         }
 
-        if (root.TryGetProperty("result", out var result))
+        if (root.TryGetProperty("result", out JsonElement result))
         {
-            return result.GetRawText();
+            return result.Clone();
         }
 
         throw new InvalidOperationException(
             $"Unexpected MCP response from slot '{slotId}' tool '{toolName}': {rpcJson}");
+    }
+
+    // Plugin tool returns are wrapped by the MCP SDK in a text content block.
+    // Pull content[0].text and parse as JSON so structured payloads ride as nodes;
+    // fall back to a string value for plain text returns (e.g. "Done.").
+    private static JsonNode? ExtractPayload(JsonElement mcpResult)
+    {
+        if (mcpResult.ValueKind != JsonValueKind.Object) return null;
+        if (!mcpResult.TryGetProperty("content", out JsonElement content) ||
+            content.ValueKind != JsonValueKind.Array ||
+            content.GetArrayLength() == 0)
+        {
+            return null;
+        }
+
+        JsonElement first = content[0];
+        if (first.ValueKind != JsonValueKind.Object ||
+            !first.TryGetProperty("text", out JsonElement textEl) ||
+            textEl.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        string text = textEl.GetString() ?? "";
+        try
+        {
+            return JsonNode.Parse(text);
+        }
+        catch (JsonException)
+        {
+            return JsonValue.Create(text);
+        }
     }
 }

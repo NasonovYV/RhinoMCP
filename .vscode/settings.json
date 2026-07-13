@@ -1,4 +1,5 @@
 {
+  "dotnet.defaultSolution": "rhino.slnx",
   "files.exclude": {
     "**/bin": true,
     "**/obj": true,

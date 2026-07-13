@@ -6,39 +6,41 @@ namespace RhMcp.Tools;
 [McpServerToolType]
 public static class RunCSharpTool
 {
-    [McpServerTool(Name = "run_csharp")]
-    [Description("Execute a C# script. Returns JSON with stdout and error fields; error is null on success.")]
+    [McpServerTool("run_csharp", "Run C# Script", false, true)]
+    [Description("Execute a C# script targeted at this slot's document. The script editor injects `__rhino_doc__` (type `RhinoDoc`) — use it as your document handle instead of `RhinoDoc.ActiveDoc` or anything else. Returns JSON with stdout and error fields; error is null on success.")]
     public static string RunCSharp(
+        RhinoDoc doc,
         [Description("Script")] string script)
     {
-        var tmp = Path.Combine(Path.GetTempPath(), $"rhino_mcp_{Guid.NewGuid():N}.cs");
+        string tmp = Path.Combine(Path.GetTempPath(), $"rhino_mcp_{Guid.NewGuid():N}.cs");
         File.WriteAllText(tmp, script);
         RhinoApp.CommandWindowCaptureEnabled = true;
-        RhinoApp.InvokeAndWait(() => RhinoApp.RunScript($"-ScriptEditor _Run \"{tmp}\"", false));
+        RhinoApp.RunScript(doc.RuntimeSerialNumber, $"_-ScriptEditor _Run \"{tmp}\"", false);
         string[] lines = RhinoApp.CapturedCommandWindowStrings(true);
         RhinoApp.CommandWindowCaptureEnabled = false;
         _ = Task.Delay(15_000).ContinueWith(_ => { try { File.Delete(tmp); } catch { } });
 
-        var filtered = (lines ?? [])
+        string[] filtered = (lines ?? [])
             .Where(l => !l.StartsWith("Command:", StringComparison.OrdinalIgnoreCase))
             .ToArray();
 
         int errIndex = Array.FindIndex(filtered, l =>
-            l.Contains("error CS", StringComparison.Ordinal) ||
+            l.StartsWith("Compile Error", StringComparison.OrdinalIgnoreCase) ||
+            l.Contains("error CS", StringComparison.OrdinalIgnoreCase) ||
             l.Contains("Exception:", StringComparison.Ordinal) ||
             l.StartsWith("Unhandled exception", StringComparison.OrdinalIgnoreCase));
 
         string stdout;
-        string error;
+        string? error;
         if (errIndex >= 0)
         {
-            stdout = string.Join("\n", filtered.Take(errIndex));
-            error = string.Join("\n", filtered.Skip(errIndex));
+            stdout = string.Concat(filtered.Take(errIndex));
+            error = string.Concat(filtered.Skip(errIndex));
         }
         else
         {
-            stdout = string.Join("\n", filtered);
-            error = string.Empty;
+            stdout = string.Concat(filtered);
+            error = null;
         }
 
         return JsonSerializer.Serialize(new { stdout, error });

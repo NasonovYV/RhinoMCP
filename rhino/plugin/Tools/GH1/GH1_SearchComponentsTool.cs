@@ -17,7 +17,7 @@ public static class GH1_SearchComponentsTool
         string Kind,
         string Description);
 
-    [McpServerTool(Name = "search_components")]
+    [McpServerTool("g1_search_components", "Search GH1 Components", true, false)]
     [Description("Search the Grasshopper component library by substring. Matches Name, NickName, and Description (case-insensitive). Optional exact-match category/subcategory filters. Returns up to 'limit' matches.")]
     public static string Search(
         RhinoDoc _,

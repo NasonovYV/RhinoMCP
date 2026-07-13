@@ -12,18 +12,27 @@ namespace RhMcp.Router;
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
+    
 // Router-specific types.
 [JsonSerializable(typeof(ChildRhino))]
 [JsonSerializable(typeof(IReadOnlyCollection<ChildRhino>))]
-[JsonSerializable(typeof(SpawnErrorPayload))]
 [JsonSerializable(typeof(RhinoCrashReport))]
 [JsonSerializable(typeof(JsonRpcRequest))]
 [JsonSerializable(typeof(JsonRpcRequestParams))]
 [JsonSerializable(typeof(SpawnListenerArgs))]
 [JsonSerializable(typeof(CloseListenerArgs))]
+[JsonSerializable(typeof(QuitAppArgs))]
+[JsonSerializable(typeof(Announcement))]
+[JsonSerializable(typeof(Departure))]
+[JsonSerializable(typeof(ReturnResult))]
+[JsonSerializable(typeof(ErrorInfo))]
+[JsonSerializable(typeof(SlotInfo))]
 [JsonSerializable(typeof(JsonObject))]
 [JsonSerializable(typeof(JsonElement))]
 [JsonSerializable(typeof(JsonElement?))]
+[JsonSerializable(typeof(Dictionary<string, JsonElement>))]
+[JsonSerializable(typeof(List<JsonElement>))]
+
 // Primitives used as tool param/return types. MCP's schema generation walks
 // these via our resolver, so they must each be declared explicitly when the
 // reflection fallback is disabled (e.g. under AOT or trim).
@@ -54,15 +63,6 @@ public sealed record JsonRpcRequestParams(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("arguments")] JsonNode Arguments);
 
-// SpawnSlotTool's catch-block payload. `error` is a stable kebab-case code the
-// agent can branch on; `message` is human-readable detail ending in what the
-// agent should do next. `crashReport` is populated when the failure can be
-// traced to a known Rhino crash (Mac only — see RhinoCrashReportFinder).
-public sealed record SpawnErrorPayload(
-    [property: JsonPropertyName("error")] string Error,
-    [property: JsonPropertyName("message")] string Message,
-    [property: JsonPropertyName("crashReport")] RhinoCrashReport? CrashReport = null);
-
 // Compact summary of a macOS .ips crash report. Just the agent-actionable bits
 // — not the full 100KB body. `path` points at the report on disk for human
 // follow-up.
@@ -91,3 +91,23 @@ public sealed record SpawnListenerArgs();
 
 public sealed record CloseListenerArgs(
     [property: JsonPropertyName("port")] int Port);
+
+public sealed record QuitAppArgs();
+
+// Drop-file shape written by the plugin into <temp>/rhino-mcp-listeners/.
+// `v` is a schema version — bump only if the file shape changes in a
+// non-additive way. Unknown future fields are ignored on read.
+public sealed record Announcement(
+    [property: JsonPropertyName("v")] int V,
+    [property: JsonPropertyName("pid")] int Pid,
+    [property: JsonPropertyName("port")] int Port,
+    [property: JsonPropertyName("version")] string? Version);
+
+// Tombstone the plugin drops when a listener closes cleanly. Lets the router
+// prune the slot and tell a user-initiated close apart from a crash. Sibling to
+// Announcement in the same drop dir, distinguished by a `.gone` extension.
+public sealed record Departure(
+    [property: JsonPropertyName("v")] int V,
+    [property: JsonPropertyName("pid")] int Pid,
+    [property: JsonPropertyName("port")] int Port,
+    [property: JsonPropertyName("version")] string? Version);

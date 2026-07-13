@@ -5,18 +5,23 @@ namespace RhMcp.Tools;
 [McpServerToolType]
 public static class ZoomToObjectTool
 {
-    [McpServerTool(Name = "zoom_to_object")]
+    [McpServerTool("zoom_to_object", "Zoom To Object", false, false)]
     [Description("Zoom the active viewport to fit one or more objects by GUID.")]
     public static string ZoomToObject(
         RhinoDoc doc,
         [Description("Object GUIDs to zoom to")] string[] ids)
     {
-        var bb = BoundingBox.Empty;
-
-        foreach (var idStr in ids)
+        if (doc.IsHeadless)
         {
-            if (!Guid.TryParse(idStr, out var guid)) continue;
-            var obj = doc.Objects.FindId(guid);
+            return "Cannot zoom in headless doc";
+        }
+        
+        BoundingBox bb = BoundingBox.Empty;
+
+        foreach (string idStr in ids)
+        {
+            if (!Guid.TryParse(idStr, out Guid guid)) continue;
+            Rhino.DocObjects.RhinoObject obj = doc.Objects.FindId(guid);
             if (obj?.Geometry == null) continue;
             bb.Union(obj.Geometry.GetBoundingBox(true));
         }
@@ -27,11 +32,8 @@ public static class ZoomToObjectTool
         var vp = doc.Views.ActiveView?.ActiveViewport
             ?? throw new InvalidOperationException("No active viewport.");
 
-        RhinoApp.InvokeAndWait(() =>
-        {
-            vp.ZoomBoundingBox(bb);
-            doc.Views.Redraw();
-        });
+        vp.ZoomBoundingBox(bb);
+        doc.Views.Redraw();
 
         return $"Zoomed to {ids.Length} object(s).";
     }

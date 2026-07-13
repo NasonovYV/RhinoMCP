@@ -8,7 +8,7 @@ namespace RhMcp.Tools;
 [McpServerToolType]
 public static class SetLayerMaterialTool
 {
-    [McpServerTool(Name = "set_layer_material")]
+    [McpServerTool("set_layer_material", "Set Layer Material", false, true)]
     [Description("Set the render material on a layer. Accepts diffuse color, transparency, and gloss. Optionally also sets the layer display color.")]
     public static string SetLayerMaterial(
         RhinoDoc doc,
@@ -25,36 +25,29 @@ public static class SetLayerMaterialTool
         if (color is not null && parsedColor is null)
             return $"Could not parse color: {color}";
 
-        string result = string.Empty;
+        var lay = doc.Layers[idx];
 
-        RhinoApp.InvokeAndWait(() =>
+        if (parsedColor.HasValue && applyToLayerColor)
+            lay.Color = parsedColor.Value;
+
+        var matIdx = lay.RenderMaterialIndex;
+        if (matIdx < 0)
         {
-            var lay = doc.Layers[idx];
+            var newMat = new Material { Name = $"{lay.Name}_material" };
+            if (parsedColor.HasValue) newMat.DiffuseColor = parsedColor.Value;
+            matIdx = doc.Materials.Add(newMat);
+            lay.RenderMaterialIndex = matIdx;
+        }
 
-            if (parsedColor.HasValue && applyToLayerColor)
-                lay.Color = parsedColor.Value;
+        var mat = doc.Materials[matIdx];
 
-            var matIdx = lay.RenderMaterialIndex;
-            if (matIdx < 0)
-            {
-                var newMat = new Material { Name = $"{lay.Name}_material" };
-                if (parsedColor.HasValue) newMat.DiffuseColor = parsedColor.Value;
-                matIdx = doc.Materials.Add(newMat);
-                lay.RenderMaterialIndex = matIdx;
-            }
+        if (parsedColor.HasValue) mat.DiffuseColor = parsedColor.Value;
+        if (transparency.HasValue) mat.Transparency = Math.Clamp(transparency.Value, 0.0, 1.0);
+        if (gloss.HasValue) mat.Shine = Math.Clamp(gloss.Value, 0.0, 1.0) * Material.MaxShine;
 
-            var mat = doc.Materials[matIdx];
-
-            if (parsedColor.HasValue) mat.DiffuseColor = parsedColor.Value;
-            if (transparency.HasValue) mat.Transparency = Math.Clamp(transparency.Value, 0.0, 1.0);
-            if (gloss.HasValue) mat.Shine = Math.Clamp(gloss.Value, 0.0, 1.0) * Material.MaxShine;
-
-            mat.CommitChanges();
-            doc.Views.Redraw();
-            result = $"Updated layer \"{layer}\" (material index {matIdx}).";
-        });
-
-        return result;
+        mat.CommitChanges();
+        doc.Views.Redraw();
+        return $"Updated layer \"{layer}\" (material index {matIdx}).";
     }
 
     private static Color? ParseColor(string? s)

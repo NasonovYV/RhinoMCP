@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'connector/**'
+      - 'shared/router-launcher.mjs'
       - '.github/workflows/connector.yml'
   pull_request:
     branches: [main]
     paths:
       - 'connector/**'
+      - 'shared/router-launcher.mjs'
       - '.github/workflows/connector.yml'
 
 env:
@@ -20,18 +22,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
+        with:
+          submodules: false
+          lfs: true
+          fetch-depth: 1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: connector/server/package-lock.json
-
-      - name: Install server dependencies
-        working-directory: connector/server
-        run: npm ci
 
       - name: Validate manifest
         working-directory: connector
@@ -39,14 +39,14 @@ jobs:
 
       - name: Pack .mcpb bundle
         working-directory: connector
-        run: npx --yes @anthropic-ai/mcpb pack
+        run: node build.mjs
 
       - name: Inspect bundle
         working-directory: connector
         run: npx --yes @anthropic-ai/mcpb info *.mcpb
 
       - name: Upload bundle artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: rhino-mcp-platform-connector
           path: connector/*.mcpb

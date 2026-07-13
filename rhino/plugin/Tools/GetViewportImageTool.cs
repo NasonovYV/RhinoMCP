@@ -2,10 +2,6 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 
-using Microsoft.Extensions.AI;
-
-using ModelContextProtocol;
-
 using Rhino.Display;
 using Rhino.DocObjects;
 using Rhino.Geometry;
@@ -16,9 +12,9 @@ namespace RhMcp.Tools;
 public static class GetViewportImageTool
 {
 
-    [McpServerTool(Name = "get_viewport_image")]
+    [McpServerTool("get_viewport_image", "Capture Viewport Image", false, false)]
     [Description("Capture the active Rhino viewport as JPG. Returns the image plus a JSON metadata block describing the resulting camera, display mode, framed scene bounds, and on-screen object count — use the metadata to diagnose empty/off-screen captures without re-shooting.")]
-    public static IEnumerable<AIContent> GetViewportImage(
+    public static IEnumerable<ContentBlock> GetViewportImage(
         RhinoDoc doc,
         [Description("Image width pixels (default 480) (max 1280) increase sparingly")] int width = 480,
         [Description("Image height pixels (default 270) (max 720) increase sparingly")] int height = 270,
@@ -30,91 +26,89 @@ public static class GetViewportImageTool
         [Description("Frame this bounding box (max corner). Pair with boxMin.")] Vector3d? boxMax = null,
         [Description("Magnification factor: >1 zoom in, 0<x<1 zoom out. Applied after boxMin/boxMax if both supplied.")] double? zoom = null)
     {
+        if (doc.IsHeadless)
+        {
+            return [ContentBlock.CreateText(SerializeResult(null, $"Cannot capture view in headless doc"))];
+        }
+
         width = Math.Min(width, 1280);
         height = Math.Min(height, 720);
 
         var activeView = doc.Views.ActiveView
-            ?? throw new McpException("No active view.");
+            ?? throw new InvalidOperationException("No active view.");
 
         Bitmap? bitmap = null;
         string? error = null;
         CaptureMetadata? meta = null;
 
-        RhinoApp.InvokeAndWait(() =>
+        var vp = activeView.ActiveViewport;
+
+        try
         {
-            var vp = activeView.ActiveViewport;
-
-            try
+            if (!string.IsNullOrEmpty(view))
             {
-                if (!string.IsNullOrEmpty(view))
+                var proj = ParseProjection(view);
+                if (proj == DefinedViewportProjection.None)
                 {
-                    var proj = ParseProjection(view);
-                    if (proj == DefinedViewportProjection.None)
-                    {
-                        error = $"Unknown view: {view}";
-                        return;
-                    }
-                    vp.SetProjection(proj, null, true);
+                    return [ContentBlock.CreateText(SerializeResult(meta, $"Unknown view: {view}"))];
                 }
-
-                if (!string.IsNullOrEmpty(displayMode))
-                {
-                    var mode = FindDisplayMode(displayMode);
-                    if (mode is null)
-                    {
-                        error = $"Unknown display mode: {displayMode}";
-                        return;
-                    }
-                    vp.DisplayMode = mode;
-                }
-
-                if (cameraLocation is not null)
-                    vp.SetCameraLocation((Point3d)cameraLocation, false);
-
-                if (target is not null)
-                    vp.SetCameraTarget((Point3d)target, false);
-
-                if (boxMin is not null && boxMax is not null)
-                {
-                    var bb = new BoundingBox((Point3d)boxMin, (Point3d)boxMax);
-                    if (bb.IsValid)
-                        vp.ZoomBoundingBox(bb);
-                    else
-                    {
-                        error = "boxMin/boxMax do not form a valid bounding box.";
-                        return;
-                    }
-                }
-
-                if (zoom.HasValue)
-                    vp.Magnify(zoom.Value, true);
-
-                activeView.Redraw();
-
-                meta = GatherMetadata(activeView, width, height);
-
-                if (meta.VisibleObjectCount == 0)
-                {
-                    error = "Viewport is empty — no document objects intersect the view frustum. " +
-                            "Camera/target may be off the model. See metadata.scene.boundingBox for where geometry actually lives.";
-                    return;
-                }
-
-                bitmap = activeView.CaptureToBitmap(new Size(width, height));
+                vp.SetProjection(proj, null, true);
             }
-            catch (Exception ex)
+
+            if (!string.IsNullOrEmpty(displayMode))
             {
-                error = $"Capture failed: {ex.Message}";
+                var mode = FindDisplayMode(displayMode);
+                if (mode is null)
+                {
+                    return [ContentBlock.CreateText(SerializeResult(meta, $"Unknown display mode: {displayMode}"))];
+                }
+                vp.DisplayMode = mode;
             }
-        });
+
+            if (cameraLocation is not null)
+                vp.SetCameraLocation((Point3d)cameraLocation, false);
+
+            if (target is not null)
+                vp.SetCameraTarget((Point3d)target, false);
+
+            if (boxMin is not null && boxMax is not null)
+            {
+                var bb = new BoundingBox((Point3d)boxMin, (Point3d)boxMax);
+                if (bb.IsValid)
+                    vp.ZoomBoundingBox(bb);
+                else
+                {
+                    return [ContentBlock.CreateText(SerializeResult(meta, "boxMin/boxMax do not form a valid bounding box."))];
+                }
+            }
+
+            if (zoom.HasValue)
+                vp.Magnify(zoom.Value, true);
+
+            activeView.Redraw();
+
+            meta = GatherMetadata(activeView, width, height);
+
+            if (meta.VisibleObjectCount == 0)
+            {
+                return [ContentBlock.CreateText(SerializeResult(meta, "Viewport is empty — no document objects intersect the view frustum. " +
+                        "Camera/target may be off the model. See metadata.scene.boundingBox for where geometry actually lives."))];
+            }
+
+            bitmap = activeView.CaptureToBitmap(new Size(width, height));
+        }
+        catch (Exception ex)
+        {
+            error = $"Capture failed: {ex.Message}";
+        }
 
         if (error is not null)
         {
-            return [new TextContent(SerializeResult(meta, error))];
+            return [ContentBlock.CreateText(SerializeResult(meta, error))];
         }
         if (bitmap is null)
         {
-            return [new TextContent(SerializeResult(meta, "could not capture image"))];
+            return [ContentBlock.CreateText(SerializeResult(meta, "could not capture image"))];
         }
 
         using var ms = new MemoryStream();
@@ -122,22 +116,16 @@ public static class GetViewportImageTool
 
         return
         [
-            new TextContent(SerializeResult(meta, null)),
-            new DataContent(ms.ToArray(), "image/jpeg"),
+            ContentBlock.CreateText(SerializeResult(meta, null)),
+            ContentBlock.CreateImage(ms.ToArray(), "image/jpeg"),
         ];
     }
 
     private sealed class CaptureMetadata
     {
-        public string ViewportName { get; set; } = "";
-        public string DisplayMode { get; set; } = "";
-        public string Projection { get; set; } = "";
-        public double LensLength { get; set; }
-        public Point3d CameraLocation { get; set; }
-        public Point3d CameraTarget { get; set; }
-        public Vector3d CameraUp { get; set; }
-        public int ImageWidth { get; set; }
-        public int ImageHeight { get; set; }
+        public required GetContextTool.ViewportSummary Viewport { get; init; }
+        public required int ImageWidth { get; init; }
+        public required int ImageHeight { get; init; }
         public BoundingBox SceneBoundingBox { get; set; } = BoundingBox.Empty;
         public int VisibleObjectCount { get; set; }
         public int TotalObjectCount { get; set; }
@@ -150,15 +138,7 @@ public static class GetViewportImageTool
 
         var meta = new CaptureMetadata
         {
-            ViewportName = vp.Name ?? "",
-            DisplayMode = vp.DisplayMode?.EnglishName ?? "",
-            Projection = vp.IsPerspectiveProjection ? "perspective"
-                       : vp.IsParallelProjection ? "parallel"
-                       : "two-point-perspective",
-            LensLength = vp.Camera35mmLensLength,
-            CameraLocation = vp.CameraLocation,
-            CameraTarget = vp.CameraTarget,
-            CameraUp = vp.CameraUp,
+            Viewport = GetContextTool.SummarizeViewport(vp),
             ImageWidth = width,
             ImageHeight = height,
         };
@@ -202,25 +182,25 @@ public static class GetViewportImageTool
             {
                 viewport = new
                 {
-                    name = meta.ViewportName,
-                    displayMode = meta.DisplayMode,
-                    projection = meta.Projection,
+                    name = meta.Viewport.Name,
+                    displayMode = meta.Viewport.DisplayMode,
+                    projection = meta.Viewport.Camera.Projection,
                     width = meta.ImageWidth,
                     height = meta.ImageHeight,
                 },
                 camera = new
                 {
-                    location = XYZ(meta.CameraLocation),
-                    target = XYZ(meta.CameraTarget),
-                    up = XYZ((Point3d)meta.CameraUp),
-                    lensLength = meta.LensLength,
+                    location = meta.Viewport.Camera.Location,
+                    target = meta.Viewport.Camera.Target,
+                    up = meta.Viewport.Camera.Up,
+                    lensLength = meta.Viewport.Camera.LensLength,
                 },
                 scene = new
                 {
                     boundingBox = meta.SceneBoundingBox.IsValid ? new
                     {
-                        min = XYZ(meta.SceneBoundingBox.Min),
-                        max = XYZ(meta.SceneBoundingBox.Max),
+                        min = GetContextTool.XYZ(meta.SceneBoundingBox.Min),
+                        max = GetContextTool.XYZ(meta.SceneBoundingBox.Max),
                     } : null,
                     visibleObjectCount = meta.VisibleObjectCount,
                     totalObjectCount = meta.TotalObjectCount,
@@ -229,8 +209,6 @@ public static class GetViewportImageTool
         };
         return JsonSerializer.Serialize(payload);
     }
-
-    private static double[] XYZ(Point3d p) => [p.X, p.Y, p.Z];
 
     private static DefinedViewportProjection ParseProjection(string s) => s.ToLowerInvariant() switch
     {

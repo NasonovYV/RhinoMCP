@@ -1,23 +1,42 @@
 using RhMcp.Resources;
 
-using Grasshopper2;
-using Grasshopper2.UI;
+using Grasshopper2.Doc;
 
 namespace RhMcp.Tools;
 
 [McpServerToolType]
 public static class GH2_SolveTool
 {
-    [McpServerTool(Name = "solve_canvas")]
-    [Description("Solves the active GH2 canvas")]
-    public static string SolveCanvas(RhinoDoc _)
+    public sealed record SolveResult(bool Solved, string Phase, int Errors, int Warnings, GH2Diagnostic[] Diagnostics);
+    public sealed record SolveError(bool Solved, string Error);
+
+    [McpServerTool("g2_solve_canvas", "Solve GH2 Canvas", false, false)]
+    [Description("Solves the active GH2 canvas and reads back per-component diagnostics. Returns {Solved, Phase, Errors, Warnings, Diagnostics[]}. Each diagnostic is {Id, Name, Nickname, Level (Remark|Warning|Error|Fault), Message}. Solved is true only when the solution completed with no Error or Fault. Use this to see exactly which components failed and why, then fix them.")]
+    public static string SolveCanvas(RhinoDoc rhDoc)
     {
-        if (!GH2_Utils.TryGetDoc(out var ghDoc)) return "Could not get GHDoc";
+        if (!GH2_Utils.TryGetDoc(rhDoc, out Document ghDoc))
+            return JsonSerializer.Serialize(new SolveError(false, "Could not get GH2 document"));
 
-        var solution = ghDoc.Solution.StartWait();
+        Solution solution;
+        try
+        {
+            solution = ghDoc.Solution.StartWait();
+        }
+        catch (Exception ex)
+        {
+            return JsonSerializer.Serialize(new SolveError(false, ex.Message));
+        }
 
-        // TODO : Return the solutoin as a nice JSON result
+        List<GH2Diagnostic> diagnostics = GH2_Diagnostics.Collect(ghDoc);
+        (int errors, int warnings) = GH2_Diagnostics.Count(diagnostics);
 
-        return JsonSerializer.Serialize(new { /* result */ });
+        bool solved = solution.Phase == SolutionPhase.Completed && errors == 0;
+
+        return JsonSerializer.Serialize(new SolveResult(
+            solved,
+            solution.Phase.ToString(),
+            errors,
+            warnings,
+            diagnostics.ToArray()));
     }
 }

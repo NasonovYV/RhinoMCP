@@ -1,6 +1,5 @@
-﻿using System.Reflection;
-using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
+
 using Rhino.PlugIns;
 
 // Plug-in Description Attributes - all of these are optional.
@@ -11,7 +10,7 @@ using Rhino.PlugIns;
 [assembly: PlugInDescription(DescriptionType.Phone, "206-545-7000")]
 [assembly: PlugInDescription(DescriptionType.Organization, "Robert McNeel & Associates")]
 [assembly: PlugInDescription(DescriptionType.UpdateUrl, "http://www.updates.mcneel.com")]
-[assembly: PlugInDescription(DescriptionType.WebSite, "http://www.mcneel.com")]
+[assembly: PlugInDescription(DescriptionType.WebSite, "https://mcneel.github.io/RhinoMCP/")]
 
 // The following GUID is for the ID of the typelib if this project is exposed to COM
 // This will also be the Guid of the Rhino plug-in

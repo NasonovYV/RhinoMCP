@@ -1,93 +1,131 @@
 using ModelContextProtocol.Server;
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace RhMcp.Router.Tools;
 
 [McpServerToolType]
 public class SpawnSlotTool(RhinoManager manager, RhinoCrashReportFinder crashFinder)
 {
-    [McpServerTool(Name = "spawn_slot")]
+    [McpServerTool(Name = "spawn_slot", Title = "Spawn Rhino Slot", ReadOnly = false, Destructive = false)]
     [Description("Launch a new Rhino instance and return its slot ID. Pass that ID as the `slot` arg on subsequent tool calls to target this Rhino.")]
     public async Task<string> SpawnAsync(
-        [Description("Rhino version: '8', '9', or 'WIP'. Omit to use the router's configured default.")]
+        [Description("Rhino version: '8', '9', 'BETA', or 'WIP' ('9'/'BETA'/'WIP' are interchangeable). Omit to use the router's configured default.")]
         string? version = null,
         CancellationToken ct = default)
     {
         try
         {
-            var child = await manager.SpawnAsync(version, ct).ConfigureAwait(false);
-            return JsonSerializer.Serialize(child, RouterJsonContext.Default.ChildRhino);
+            ChildRhino child = await manager.SpawnAsync(version, ct).ConfigureAwait(false);
+            JsonNode? payload = JsonSerializer.SerializeToNode(child, RouterJsonContext.Default.ChildRhino);
+            return new ReturnResult(payload, Error: null, AutoSpawnedSlot: null).AsJson;
         }
         catch (Exception ex)
         {
-            // The MCP SDK swallows raw exception messages into a generic "An error
-            // occurred…", so we translate the exception into a stable, agent-readable
-            // payload (kebab-case error code + actionable message + crash report when
-            // we can find one). Stack traces are deliberately omitted — they belong
-            // in the router log, not in the agent's tool result.
-            var payload = Diagnose(ex);
-            return JsonSerializer.Serialize(payload, RouterJsonContext.Default.SpawnErrorPayload);
+            // MCP SDK would otherwise swallow the message into a generic "An error
+            // occurred…". Stack traces stay in the router log.
+            ErrorInfo error = Diagnose(ex, crashFinder);
+            return new ReturnResult(Payload: null, Error: error, AutoSpawnedSlot: null).AsJson;
         }
     }
 
-    [McpServerTool(Name = "close_slot")]
-    [Description("Close a Rhino slot gracefully. Saves nothing.")]
-    public Task<bool> CloseAsync(
-        [Description("Slot ID returned by spawn_slot")]
+    [McpServerTool(Name = "close_slot", Title = "Close Rhino Slot", ReadOnly = false, Destructive = true)]
+    [Description("Close a Rhino slot gracefully. Saves nothing. On success `payload.closed` is true. On failure `error.code` is one of: `slot_not_found` (no slot with that ID is currently running), `cannot_close_adopted` (the slot was a user-started Rhino, the router will not kill it; ask the user to close the Rhino window), `close_failed` (the router tried to close the slot but the operation did not complete; the slot may still be running).")]
+    public async Task<string> CloseAsync(
+        [Description("Slot ID returned by spawn_slot, or an animal-name slot adopted from a user-started Rhino")]
         string slot,
-        CancellationToken ct = default) => manager.CloseAsync(slot, ct);
-
-    [McpServerTool(Name = "list_slots")]
-    [Description("List all currently-running Rhino slots managed by this router. Slots whose Rhino has crashed are pruned before returning.")]
-    public IReadOnlyCollection<ChildRhino> List()
+        CancellationToken ct = default)
     {
-        // Probe each slot before reporting; a crashed Rhino otherwise looks alive
-        // until something tries to call into it.
-        manager.ReapAllDead();
-        return manager.List();
+        if (!manager.Has(slot))
+        {
+            ErrorInfo notFound = new(
+                Code: "slot_not_found",
+                Message: $"No slot named ({slot}). Call list_slots to see what is running.");
+            return new ReturnResult(Payload: null, Error: notFound, AutoSpawnedSlot: null).AsJson;
+        }
+
+        try
+        {
+            bool closed = await manager.CloseAsync(slot, ct).ConfigureAwait(false);
+            if (!closed)
+            {
+                // A bare false means the close attempt itself failed (e.g. the Mac
+                // sibling control-channel call threw and was logged). Surface a typed
+                // code so the agent has something to branch on, not closed:false with
+                // error:null which matches neither arm of the contract.
+                ErrorInfo error = new(
+                    Code: "close_failed",
+                    Message: $"Slot '{slot}' could not be closed; it may still be running. " +
+                        "Retry close_slot, or ask the user to close the Rhino window.");
+                return new ReturnResult(Payload: null, Error: error, AutoSpawnedSlot: null).AsJson;
+            }
+            JsonObject payload = new() { ["closed"] = true };
+            return new ReturnResult(payload, Error: null, AutoSpawnedSlot: null).AsJson;
+        }
+        catch (AdoptedSlotCloseException ex)
+        {
+            ErrorInfo error = new(
+                Code: "cannot_close_adopted",
+                Message: ex.Message + " Ask the user to close the Rhino window themselves.");
+            return new ReturnResult(Payload: null, Error: error, AutoSpawnedSlot: null).AsJson;
+        }
     }
 
-    // Map a raw exception from the spawn pipeline to an agent-readable diagnosis.
-    // Every branch ends in a message that tells the agent what to do next (retry,
-    // change args, check Rhino UI, give up). The `existing_rhino_unreachable`
-    // branch is enriched with the latest crash report when one exists.
-    private SpawnErrorPayload Diagnose(Exception ex) => ex switch
+    [McpServerTool(Name = "list_slots", Title = "List Rhino Slots", ReadOnly = true, Destructive = false)]
+    [Description("List all currently-running Rhino slots managed by this router. Slots whose Rhino has crashed are pruned before returning. User-started Rhinos that have advertised themselves since the last call are adopted into the list. The list lives in `payload` (an array of slot objects).")]
+    public string List()
     {
-        FileNotFoundException fnf => new(
-            "rhino_not_installed",
-            fnf.Message + " Pass an installed version as the `version` arg, or install the requested Rhino."),
+        // Adopt anything the plugin has announced since the last call, then probe
+        // each slot before reporting; a crashed Rhino otherwise looks alive until
+        // something tries to call into it.
+        manager.ScanAnnouncements();
+        manager.ReapAllDead();
+        IReadOnlyCollection<ChildRhino> slots = manager.List();
+        JsonNode? payload = JsonSerializer.SerializeToNode(
+            slots, RouterJsonContext.Default.IReadOnlyCollectionChildRhino);
+        return new ReturnResult(payload, Error: null, AutoSpawnedSlot: null).AsJson;
+    }
 
-        TimeoutException te => new(
-            "startup_timeout",
-            te.Message + " The Rhino window may be showing a license, EULA, or update dialog — check it. " +
-            "If the rh-mcp plugin isn't loaded, install it and retry."),
+    // Shared spawn-pipeline shapes route through SpawnDiagnostics; this caller
+    // appends its spawn_slot next-action suffix. The arms below are spawn-specific.
+    internal static ErrorInfo Diagnose(Exception ex, RhinoCrashReportFinder crashFinder)
+    {
+        if (SpawnDiagnostics.TryClassify(ex, crashFinder, out SpawnDiagnostics.SpawnDiagnosis diag))
+        {
+            string suffix = diag.Code switch
+            {
+                "rhino_not_installed" => " Pass an installed version as the `version` arg, or install the requested Rhino.",
+                "existing_rhino_unreachable" => " Call spawn_slot again to launch a fresh Rhino.",
+                _ => "",
+            };
+            return new(diag.Code, diag.BaseMessage + suffix, diag.CrashReportPath);
+        }
 
-        PlatformNotSupportedException pne => new(
-            "unsupported_platform",
-            pne.Message),
+        return ex switch
+        {
+            OperationCanceledException => new(
+                Code: "cancelled",
+                Message: "Spawn was cancelled before Rhino finished starting."),
 
-        OperationCanceledException => new(
-            "cancelled",
-            "Spawn was cancelled before Rhino finished starting."),
+            InvalidOperationException ioe => new(
+                Code: "spawn_failed",
+                Message: ioe.Message),
 
-        // HttpRequestException from the spawn chain only originates inside
-        // RhinoControlClient when fanning out a new listener on Mac. That means
-        // we tried to reuse an existing Rhino and its control endpoint didn't
-        // answer — the Rhino likely crashed between probe and call.
-        HttpRequestException hre => new(
-            "existing_rhino_unreachable",
-            "Tried to add a listener to a previously-spawned Rhino but its control endpoint didn't respond " +
-            $"({hre.Message}). The Rhino likely crashed between the liveness probe and this call. " +
-            "The stale slot has been pruned — call spawn_slot again to launch a fresh Rhino.",
-            crashFinder.TryFindMostRecent()),
+            // Non-connection HttpRequestException (a non-2xx from the Mac control
+            // endpoint during the listener fan-out, RhinoControlClient.SpawnListenerAsync).
+            // SpawnDiagnostics only owns the connection-level shape; this status-code
+            // case is spawn_slot-specific. The Rhino we tried to reuse answered but
+            // refused, so treat it as unreachable: surface a crash report if one
+            // exists and steer the agent to spawn a fresh Rhino.
+            HttpRequestException hre => new(
+                Code: "existing_rhino_unreachable",
+                Message: hre.Message + " Call spawn_slot again to launch a fresh Rhino.",
+                CrashReportPath: crashFinder.TryFindMostRecent()?.Path),
 
-        InvalidOperationException ioe => new(
-            "spawn_failed",
-            ioe.Message),
-
-        _ => new(
-            "unexpected",
-            $"{ex.GetType().Name}: {ex.Message}"),
-    };
+            _ => new(
+                Code: "unexpected",
+                Message: $"{ex.GetType().Name}: {ex.Message}"),
+        };
+    }
 }

@@ -17,14 +17,23 @@ namespace RhMcp.Router.Codegen;
 // Parameter type rule: primitive types (string/bool/int/long/double/float and
 // their nullables/arrays) pass through unchanged. Anything else — including
 // Rhino-specific types like Vector3d and the plugin's record structs — maps to
-// System.Text.Json.JsonElement? so the router doesn't have to reference
-// RhinoCommon or duplicate types. The plugin deserialises on its end.
+// an "open object" Dictionary<string, JsonElement>? so the router doesn't have to
+// reference RhinoCommon or duplicate types. The plugin deserialises on its end.
 //
 // Plugin tools take RhinoDoc as their first parameter (auto-injected from DI in
 // the plugin's MCP server). That parameter is skipped in the proxy signature.
 [Generator]
 public class RouterToolGenerator : IIncrementalGenerator
 {
+    // Router-side CLR type for any non-passthrough (complex/object) tool parameter.
+    private const string OpenObjectType =
+        "global::System.Collections.Generic.Dictionary<string, global::System.Text.Json.JsonElement>?";
+
+    // Arrays of a complex element type map here, not to OpenObjectType: an object
+    // shape can't bind to the plugin's array parameter (RH-96785).
+    private const string OpenArrayType =
+        "global::System.Collections.Generic.List<global::System.Text.Json.JsonElement>?";
+
     private static readonly HashSet<string> PassThroughTypes = new()
     {
         "string", "string?",
@@ -96,30 +105,42 @@ public class RouterToolGenerator : IIncrementalGenerator
                 var toolAttr = FindAttribute(method.AttributeLists, "McpServerTool");
                 if (toolAttr is null) continue;
 
-                var toolName = ExtractStringArg(toolAttr, "Name");
+                // McpServerToolAttribute ctor (plugin Server/Attributes.cs):
+                //   (string name, string? title, bool readOnly, bool destructive)
+                // Every plugin site writes these positionally, so match by index and
+                // let a named override (e.g. `Name = "x"`) win if one is present.
+                var toolName = ExtractStringArg(toolAttr, "Name", 0);
                 if (toolName is null) continue;
 
+                var toolTitle = ExtractStringArg(toolAttr, "Title", 1);
+                var readOnly = ExtractBoolArg(toolAttr, "ReadOnly", 2) ?? false;
+                var destructive = ExtractBoolArg(toolAttr, "Destructive", 3) ?? false;
+
                 var descAttr = FindAttribute(method.AttributeLists, "Description");
-                var description = descAttr is null ? "" : ExtractStringArg(descAttr) ?? "";
+                var description = descAttr is null ? "" : ExtractStringArg(descAttr, positionalIndex: 0) ?? "";
 
                 var parameters = new List<ParameterInfo>();
                 foreach (var p in method.ParameterList.Parameters)
                 {
                     var typeText = p.Type?.ToString() ?? "object";
-                    // Skip the auto-injected RhinoDoc parameter — it's not part of the
-                    // MCP arg surface, the plugin's SDK fills it from DI.
-                    if (typeText == "RhinoDoc") continue;
+                    // Skip auto-injected, non-MCP-surface parameters. RhinoDoc and the
+                    // request CancellationToken are filled by the plugin's SDK, never by
+                    // the caller; the proxy supplies its own trailing `ct` regardless, so
+                    // letting a plugin `ct` through would also collide with it.
+                    if (typeText is "RhinoDoc" or "CancellationToken" or "System.Threading.CancellationToken") continue;
 
                     var paramName = p.Identifier.ValueText;
                     var paramDescAttr = FindAttribute(p.AttributeLists, "Description");
-                    var paramDesc = paramDescAttr is null ? "" : ExtractStringArg(paramDescAttr) ?? "";
+                    var paramDesc = paramDescAttr is null ? "" : ExtractStringArg(paramDescAttr, positionalIndex: 0) ?? "";
                     var defaultValue = p.Default?.Value?.ToString();
                     var routerType = MapType(typeText);
 
                     parameters.Add(new ParameterInfo(paramName, routerType, paramDesc, defaultValue));
                 }
 
-                yield return new ToolInfo(className, toolName, description, parameters.ToImmutableArray());
+                yield return new ToolInfo(
+                    className, toolName, toolTitle, readOnly, destructive,
+                    description, parameters.ToImmutableArray());
             }
         }
     }
@@ -129,9 +150,9 @@ public class RouterToolGenerator : IIncrementalGenerator
         // Normalise whitespace inside the syntactic type. Arrays/nullables come through
         // as `string?`, `string[]`, `double?` etc.
         var t = typeText.Replace(" ", "");
-        return PassThroughTypes.Contains(t)
-            ? t
-            : "global::System.Text.Json.JsonElement?";
+        if (PassThroughTypes.Contains(t)) return t;
+        if (t.EndsWith("[]") || t.EndsWith("[]?")) return OpenArrayType;
+        return OpenObjectType;
     }
 
     private static void EmitProxy(StringBuilder sb, ToolInfo tool)
@@ -141,7 +162,13 @@ public class RouterToolGenerator : IIncrementalGenerator
         sb.AppendLine("[global::ModelContextProtocol.Server.McpServerToolType]");
         sb.AppendLine($"public class {className}(global::RhMcp.Router.ProxyDispatcher proxy)");
         sb.AppendLine("{");
-        sb.AppendLine($"    [global::ModelContextProtocol.Server.McpServerTool(Name = \"{tool.Name}\")]");
+        // Always emit ReadOnly + Destructive so every router proxy carries the
+        // hint annotations Anthropic's connector-submission policy requires.
+        sb.Append($"    [global::ModelContextProtocol.Server.McpServerTool(Name = \"{tool.Name}\"");
+        if (tool.Title is not null) sb.Append($", Title = \"{EscapeString(tool.Title)}\"");
+        sb.Append($", ReadOnly = {(tool.ReadOnly ? "true" : "false")}");
+        sb.Append($", Destructive = {(tool.Destructive ? "true" : "false")}");
+        sb.AppendLine(")]");
         sb.AppendLine($"    [global::System.ComponentModel.Description(\"{EscapeString(tool.Description)}\")]");
         sb.AppendLine($"    public global::System.Threading.Tasks.Task<string> InvokeAsync(");
 
@@ -155,7 +182,7 @@ public class RouterToolGenerator : IIncrementalGenerator
             sb.AppendLine(",");
         }
 
-        sb.AppendLine("        [global::System.ComponentModel.Description(\"Slot ID returned by spawn_slot. Omit to use the router's default Rhino (auto-spawned on first slot-less call).\")] string? slot = null,");
+        sb.AppendLine("        [global::System.ComponentModel.Description(\"Slot ID returned by spawn_slot. Omit to use the Rhino you're already working in (the one you last used, or one you have open); a new Rhino is auto-spawned only if none is running.\")] string? slot = null,");
 
         sb.AppendLine("        global::System.Threading.CancellationToken ct = default)");
         sb.AppendLine("    {");
@@ -168,9 +195,26 @@ public class RouterToolGenerator : IIncrementalGenerator
         sb.AppendLine("        var args = new global::System.Text.Json.Nodes.JsonObject();");
         foreach (var p in tool.Parameters)
         {
-            if (p.Type == "global::System.Text.Json.JsonElement?")
+            if (p.Type == OpenObjectType)
             {
-                sb.AppendLine($"        if ({p.Name}.HasValue) args[\"{p.Name}\"] = global::System.Text.Json.Nodes.JsonNode.Parse({p.Name}.Value.GetRawText());");
+                // Open object → rebuild a JsonObject from the dictionary entries so the
+                // plugin receives a real JSON object (e.g. {"x":..,"y":..,"z":..}), not
+                // a stringified one. Each value round-trips through its raw JSON text.
+                sb.AppendLine($"        if ({p.Name} is not null)");
+                sb.AppendLine("        {");
+                sb.AppendLine($"            var __obj_{p.Name} = new global::System.Text.Json.Nodes.JsonObject();");
+                sb.AppendLine($"            foreach (var __kv in {p.Name}) __obj_{p.Name}[__kv.Key] = global::System.Text.Json.Nodes.JsonNode.Parse(__kv.Value.GetRawText());");
+                sb.AppendLine($"            args[\"{p.Name}\"] = __obj_{p.Name};");
+                sb.AppendLine("        }");
+            }
+            else if (p.Type == OpenArrayType)
+            {
+                sb.AppendLine($"        if ({p.Name} is not null)");
+                sb.AppendLine("        {");
+                sb.AppendLine($"            var __arr_{p.Name} = new global::System.Text.Json.Nodes.JsonArray();");
+                sb.AppendLine($"            foreach (var __item in {p.Name}) __arr_{p.Name}.Add(global::System.Text.Json.Nodes.JsonNode.Parse(__item.GetRawText()));");
+                sb.AppendLine($"            args[\"{p.Name}\"] = __arr_{p.Name};");
+                sb.AppendLine("        }");
             }
             else if (p.Type.Contains("[]"))
             {
@@ -202,7 +246,17 @@ public class RouterToolGenerator : IIncrementalGenerator
                 sb.AppendLine($"        args[\"{p.Name}\"] = global::System.Text.Json.Nodes.JsonValue.Create({p.Name});");
             }
         }
-        sb.AppendLine($"        return proxy.CallToolAsync(slot, \"{tool.Name}\", args, ct);");
+        // GH2_* tools only work in Rhino WIP (Grasshopper 2 only ships there),
+        // so when no slot is passed the router auto-spawns WIP instead of the
+        // configured default. Non-GH2 tools pass null and use the configured default.
+        if (tool.ClassName.StartsWith("GH2_"))
+        {
+            sb.AppendLine($"        return proxy.CallToolAsync(slot, \"{tool.Name}\", args, ct, defaultVersionOverride: \"WIP\");");
+        }
+        else
+        {
+            sb.AppendLine($"        return proxy.CallToolAsync(slot, \"{tool.Name}\", args, ct);");
+        }
 
         sb.AppendLine("    }");
         sb.AppendLine("}");
@@ -248,26 +302,97 @@ public class RouterToolGenerator : IIncrementalGenerator
     }
 
     /// <summary>
-    /// Extract a string argument from an attribute. If <paramref name="namedArg"/> is supplied,
-    /// look for `Name = "value"`; otherwise return the first positional string literal.
+    /// Extract a string argument from an attribute, honouring both named and positional
+    /// styles. A named match (`Name = "value"`) always wins if present; otherwise the
+    /// argument at <paramref name="positionalIndex"/> (skipping any named args) is read.
+    /// Pass <paramref name="namedArg"/> = null to match positional only.
     /// </summary>
-    private static string? ExtractStringArg(AttributeSyntax attr, string? namedArg = null)
+    private static string? ExtractStringArg(AttributeSyntax attr, string? namedArg = null, int positionalIndex = -1)
     {
         if (attr.ArgumentList is null) return null;
 
-        foreach (var arg in attr.ArgumentList.Arguments)
+        if (TryFindArg(attr.ArgumentList, namedArg, positionalIndex, out AttributeArgumentSyntax matched)
+            && TryEvaluateConstantString(matched.Expression, out string value))
         {
-            if (namedArg is not null)
-            {
-                if (arg.NameEquals?.Name.Identifier.ValueText != namedArg) continue;
-            }
-
-            if (arg.Expression is LiteralExpressionSyntax lit && lit.IsKind(SyntaxKind.StringLiteralExpression))
-            {
-                return lit.Token.ValueText;
-            }
+            return value;
         }
         return null;
+    }
+
+    /// <summary>
+    /// Fold a compile-time-constant string expression to its text. Handles a bare string
+    /// literal and a `+` chain of string literals (e.g. AskUserTool's multi-line
+    /// `[Description("a" + "b" + ...)]`), so concatenated descriptions don't emit as "".
+    /// </summary>
+    private static bool TryEvaluateConstantString(ExpressionSyntax expr, out string value)
+    {
+        switch (expr)
+        {
+            case LiteralExpressionSyntax lit when lit.IsKind(SyntaxKind.StringLiteralExpression):
+                value = lit.Token.ValueText;
+                return true;
+            case ParenthesizedExpressionSyntax paren:
+                return TryEvaluateConstantString(paren.Expression, out value);
+            case BinaryExpressionSyntax bin when bin.IsKind(SyntaxKind.AddExpression)
+                && TryEvaluateConstantString(bin.Left, out string left)
+                && TryEvaluateConstantString(bin.Right, out string right):
+                value = left + right;
+                return true;
+            default:
+                value = "";
+                return false;
+        }
+    }
+
+    private static bool? ExtractBoolArg(AttributeSyntax attr, string namedArg, int positionalIndex = -1)
+    {
+        if (attr.ArgumentList is null) return null;
+
+        if (TryFindArg(attr.ArgumentList, namedArg, positionalIndex, out AttributeArgumentSyntax matched)
+            && matched.Expression is LiteralExpressionSyntax lit)
+        {
+            if (lit.IsKind(SyntaxKind.TrueLiteralExpression)) return true;
+            if (lit.IsKind(SyntaxKind.FalseLiteralExpression)) return false;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Resolve a single attribute argument by name (preferred) or by positional index.
+    /// Named args are excluded from the positional count so `[Foo("a", Bar = "b")]`
+    /// still treats "a" as positional 0.
+    /// </summary>
+    private static bool TryFindArg(AttributeArgumentListSyntax argList, string? namedArg, int positionalIndex, out AttributeArgumentSyntax matched)
+    {
+        if (namedArg is not null)
+        {
+            foreach (AttributeArgumentSyntax arg in argList.Arguments)
+            {
+                if (arg.NameEquals?.Name.Identifier.ValueText == namedArg)
+                {
+                    matched = arg;
+                    return true;
+                }
+            }
+        }
+
+        if (positionalIndex >= 0)
+        {
+            int seen = 0;
+            foreach (AttributeArgumentSyntax arg in argList.Arguments)
+            {
+                if (arg.NameEquals is not null) continue;
+                if (seen == positionalIndex)
+                {
+                    matched = arg;
+                    return true;
+                }
+                seen++;
+            }
+        }
+
+        matched = null!;
+        return false;
     }
 
     private static string EscapeString(string s)
@@ -282,6 +407,9 @@ public class RouterToolGenerator : IIncrementalGenerator
     private readonly record struct ToolInfo(
         string ClassName,
         string Name,
+        string? Title,
+        bool ReadOnly,
+        bool Destructive,
         string Description,
         ImmutableArray<ParameterInfo> Parameters);
 

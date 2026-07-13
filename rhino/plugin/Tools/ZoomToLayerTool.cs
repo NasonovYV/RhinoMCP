@@ -6,12 +6,17 @@ namespace RhMcp.Tools;
 [McpServerToolType]
 public static class ZoomToLayerTool
 {
-    [McpServerTool(Name = "zoom_to_layer")]
+    [McpServerTool("zoom_to_layer", "Zoom To Layer", false, false)]
     [Description("Zoom the active viewport to fit all objects on a layer (full path).")]
     public static string ZoomToLayer(
         RhinoDoc doc,
         [Description("Layer full path")] string layer)
     {
+        if (doc.IsHeadless)
+        {
+            return "Cannot zoom in headless doc";
+        }
+
         var idx = doc.Layers.FindByFullPath(layer, RhinoMath.UnsetIntIndex);
 
         if (idx < 0)
@@ -45,11 +50,8 @@ public static class ZoomToLayerTool
         var vp = doc.Views.ActiveView?.ActiveViewport
             ?? throw new InvalidOperationException("No active viewport.");
 
-        RhinoApp.InvokeAndWait(() =>
-        {
-            vp.ZoomBoundingBox(bb);
-            doc.Views.Redraw();
-        });
+        vp.ZoomBoundingBox(bb);
+        doc.Views.Redraw();
 
         return $"Zoomed to {count} object(s) on layer \"{layer}\".";
     }

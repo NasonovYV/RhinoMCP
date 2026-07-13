@@ -1,9 +1,0 @@
-<Solution>
-  <Folder Name="/codegen/">
-    <Project Path="D:/Tech/RhinoMCP2/rhino/router/codegen/Router.Codegen.csproj" />
-  </Folder>
-  <Folder Name="/plugin/">
-    <Project Path="D:/Tech/RhinoMCP2/rhino/plugin/RhMcp.csproj" />
-  </Folder>
-  <Project Path="D:/Tech/RhinoMCP2/rhino/router/Router.csproj" />
-</Solution>

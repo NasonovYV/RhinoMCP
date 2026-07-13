@@ -17,9 +17,17 @@
 
 # Claude
 *.mcpb
+.claude
+memory/*
+
+# Yak
+manifest.yml
 
 # Mono auto generated files
 mono_crash.*
+
+# C# Auto-Gen
+*.g.cs
 
 # Build results
 [Dd]ebug/
@@ -432,3 +440,8 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Hugo docs site build artifacts
+docs/public/
+docs/resources/
+docs/.hugo_build.lock
