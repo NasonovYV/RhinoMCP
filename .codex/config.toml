@@ -1,0 +1,10 @@
+[mcp_servers.rhino]
+command = "D:\\Tech\\RhinoMCP2\\rhino\\plugin\\bin\\R9-win\\Debug\\router\\win-x64\\rhino-mcp-router.exe"
+args = ["--default-version", "WIP"]
+enabled = true
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+
+[mcp_servers.rhino.env]
+RHINO_PACKAGE_DIRS = "D:\\Tech\\RhinoMCP2\\rhino\\plugin\\bin\\R9-win\\Debug"
+

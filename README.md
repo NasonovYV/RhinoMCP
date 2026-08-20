@@ -20,6 +20,20 @@ AI agents (Claude, OpenHands) send MCP tool calls → plugin executes inside Rhi
 | Distribution | .yak package (Rhino Package Manager) |
 | Platforms | Windows (framework-dependent) + macOS (NativeAOT) |
 
+## AI Client Setup
+
+Build the customized Rhino 9 plugin and router:
+
+```powershell
+dotnet build rhino/plugin/RhMcp.csproj --configuration Debug -p:RhinoTarget=R9
+```
+
+- Claude Code reads the repository's `.mcp.json`.
+- The ChatGPT desktop app and Codex read `.codex/config.toml` after the project is trusted. Restart the app, open this repository, and use `/mcp` to confirm that the `rhino` server is connected.
+- Both configurations launch the same bundled development router and set `RHINO_PACKAGE_DIRS` to the customized Rhino 9 plugin build.
+
+The configs currently select `WIP`. Change `--default-version` in both files to `9` if the installed Rhino build is registered as Rhino 9 rather than Rhino WIP.
+
 ## Project Structure
 
 ```

@@ -2,7 +2,7 @@
   "mcpServers": {
     "rhino-mcp-router-dev": {
       "type": "stdio",
-      "command": "D:\\Tech\\RhinoMCP2\\rhino\\router\\bin\\R9\\Debug\\net8.0\\win-x64\\rhino-mcp-router.exe",
+      "command": "D:\\Tech\\RhinoMCP2\\rhino\\plugin\\bin\\R9-win\\Debug\\router\\win-x64\\rhino-mcp-router.exe",
       "args": ["--default-version", "WIP"],
       "env": {
         "RHINO_PACKAGE_DIRS": "D:\\Tech\\RhinoMCP2\\rhino\\plugin\\bin\\R9-win\\Debug"
