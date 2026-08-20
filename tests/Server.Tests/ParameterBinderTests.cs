@@ -24,12 +24,15 @@ public class ParameterBinderTests
             Mode mode,
             System.Guid id,
             string label = "fallback",
-            int retries = 3) { }
+            int retries = 3,
+            bool flag = false) { }
 
         public void Service(IGreeter greeter) { }
         public void Cancel(System.Threading.CancellationToken ct) { }
         public void UriT(string slug) { }
     }
+
+    private record struct Wire(string SrcKey, string Src, string Dst);
 
     private static ParameterDescriptor Desc(string param, ParameterBindingKind kind)
     {
@@ -131,6 +134,116 @@ public class ParameterBinderTests
             EmptyServices(),
             default);
         Assert.That(value, Is.Null);
+    }
+
+    [Test]
+    public void Argument_number_binds_to_string()
+    {
+        object? value = ParameterBinder.Resolve(
+            Desc("name", ParameterBindingKind.Argument),
+            Args("""{ "name": 42 }"""),
+            EmptyServices(),
+            default);
+        Assert.That(value, Is.EqualTo("42"));
+    }
+
+    [Test]
+    public void Argument_bool_binds_to_string()
+    {
+        object? value = ParameterBinder.Resolve(
+            Desc("name", ParameterBindingKind.Argument),
+            Args("""{ "name": true }"""),
+            EmptyServices(),
+            default);
+        Assert.That(value, Is.EqualTo("true"));
+    }
+
+    [Test]
+    public void Nested_string_field_coerces_number_inside_array()
+    {
+        Wire[]? wires = JsonSerializer.Deserialize<Wire[]>(
+            """[ { "srcKey": "a", "src": 0, "dst": "R" } ]""",
+            McpSerializer.Options);
+        Assert.That(wires, Is.Not.Null);
+        Assert.That(wires![0].Src, Is.EqualTo("0"));
+        Assert.That(wires[0].Dst, Is.EqualTo("R"));
+    }
+
+    [Test]
+    public void Options_still_deserialises_string_keyed_dictionary()
+    {
+        CallToolRequestParams? p = JsonSerializer.Deserialize<CallToolRequestParams>(
+            """{ "name": "g1_apply_graph", "arguments": { "sliders": [], "components": [] } }""",
+            McpSerializer.Options);
+        Assert.That(p, Is.Not.Null);
+        Assert.That(p!.Name, Is.EqualTo("g1_apply_graph"));
+        Assert.That(p.Arguments!.ContainsKey("sliders"), Is.True);
+        Assert.That(p.Arguments.ContainsKey("components"), Is.True);
+    }
+
+    [Test]
+    public void Argument_string_binds_to_bool()
+    {
+        object? value = ParameterBinder.Resolve(
+            Desc("flag", ParameterBindingKind.Argument),
+            Args("""{ "flag": "true" }"""),
+            EmptyServices(),
+            default);
+        Assert.That(value, Is.EqualTo(true));
+    }
+
+    [Test]
+    public void Number_for_bool_throws()
+    {
+        Assert.Throws<JsonException>(() => ParameterBinder.Resolve(
+            Desc("flag", ParameterBindingKind.Argument),
+            Args("""{ "flag": 1 }"""),
+            EmptyServices(),
+            default));
+    }
+
+    [Test]
+    public void Argument_integral_decimal_binds_to_int()
+    {
+        object? value = ParameterBinder.Resolve(
+            Desc("count", ParameterBindingKind.Argument),
+            Args("""{ "count": 3.0 }"""),
+            EmptyServices(),
+            default);
+        Assert.That(value, Is.EqualTo(3));
+    }
+
+    [Test]
+    public void Fractional_number_for_int_throws()
+    {
+        Assert.Throws<JsonException>(() => ParameterBinder.Resolve(
+            Desc("count", ParameterBindingKind.Argument),
+            Args("""{ "count": 3.5 }"""),
+            EmptyServices(),
+            default));
+    }
+
+    [Test]
+    public void Integer_json_still_binds_to_double()
+    {
+        double value = JsonSerializer.Deserialize<double>("5", McpSerializer.Options);
+        Assert.That(value, Is.EqualTo(5.0));
+    }
+
+    [Test]
+    public void Enum_still_reads_from_number()
+    {
+        Mode value = JsonSerializer.Deserialize<Mode>("1", McpSerializer.Options);
+        Assert.That(value, Is.EqualTo(Mode.Off));
+    }
+
+    [Test]
+    public void Nullable_value_types_use_the_lenient_converters()
+    {
+        bool? flag = JsonSerializer.Deserialize<bool?>("\"false\"", McpSerializer.Options);
+        int? count = JsonSerializer.Deserialize<int?>("2.0", McpSerializer.Options);
+        Assert.That(flag, Is.EqualTo(false));
+        Assert.That(count, Is.EqualTo(2));
     }
 
     // ----- Service binding -------------------------------------------------

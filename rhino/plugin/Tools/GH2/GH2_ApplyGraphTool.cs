@@ -40,7 +40,8 @@ public static class GH2_ApplyGraphTool
         [Description("Sliders to place: {Key, Min, Value, Max, Decimals, Name?, X, Y}. Decimals: 0..12.")] SliderSpec[] sliders,
         [Description("Components to place: {Key, Selector, X, Y}. Selector is a Guid (preferred) or component Name.")] ComponentSpec[] components,
         [Description("Wires to create: {SrcKey, Src, DstKey, Dst}. Keys must match a slider or component key above.")] WireSpec[] wires,
-        [Description("If true, trigger a new solution at the end.")] bool solve = true)
+        [Description("If true, trigger a new solution at the end.")] bool solve = true,
+        [Description("Also match obsolete/hidden components by name (a Guid always works). Default false.")] bool includeDeprecated = false)
     {
         if (!GH2_Utils.TryGetDoc(rhDoc, out Document doc))
             return JsonSerializer.Serialize(new ErrResult(false, "Could not get or create GH2 document"));
@@ -78,7 +79,7 @@ public static class GH2_ApplyGraphTool
                 {
                     placeErrors.Add(new PlaceError(c.Key, "duplicate key"));
                 }
-                else if (TryPlaceComponent(doc, c, out var obj, out var err))
+                else if (TryPlaceComponent(doc, c, includeDeprecated, out var obj, out var err))
                 {
                     keyToObj[c.Key] = obj!;
                     placed.Add(new PlacedRef(c.Key, obj!.InstanceId, GH2_Utils.ClassifyKind(obj.GetType())));
@@ -158,7 +159,7 @@ public static class GH2_ApplyGraphTool
         return true;
     }
 
-    private static bool TryPlaceComponent(Document doc, ComponentSpec c, out IDocumentObject? obj, out string error)
+    private static bool TryPlaceComponent(Document doc, ComponentSpec c, bool includeDeprecated, out IDocumentObject? obj, out string error)
     {
         obj = null;
         if (Guid.TryParse(c.Selector, out Guid guid))
@@ -170,25 +171,32 @@ public static class GH2_ApplyGraphTool
         }
         else
         {
-            var matches = new List<ObjectProxy>();
-            foreach (var p in ObjectProxies.Proxies)
-                if (string.Equals(p.Nomen.Name, c.Selector, StringComparison.OrdinalIgnoreCase))
-                    matches.Add(p);
-
-            if (matches.Count == 0) { error = $"No component named '{c.Selector}'"; return false; }
-            if (matches.Count > 1)
+            switch (GH2_ProxyResolver.Resolve(c.Selector, includeDeprecated))
             {
-                var names = string.Join(", ", matches.Select(p => $"{p.Id} ({p.Nomen.Chapter}/{p.Nomen.Section})"));
-                error = $"Component name '{c.Selector}' is ambiguous ({matches.Count} matches): {names}. Pass a Guid to disambiguate.";
-                return false;
+                case GH2_ProxyResolution.Found found:
+                    obj = found.Proxy.Emit();
+                    if (obj is null) { error = $"Failed to instantiate '{c.Selector}'"; return false; }
+                    break;
+                case GH2_ProxyResolution.Ambiguous ambiguous:
+                    error = $"Component name '{c.Selector}' is ambiguous ({ambiguous.Candidates.Count} matches): {Summarize(ambiguous.Candidates)}. Pass a Guid to disambiguate.";
+                    return false;
+                case GH2_ProxyResolution.OnlyDeprecated onlyDeprecated:
+                    error = $"Only obsolete or hidden components match '{c.Selector}': {Summarize(onlyDeprecated.Candidates)}. Pass a Guid, or set includeDeprecated=true, to use one.";
+                    return false;
+                case GH2_ProxyResolution.NotFound:
+                    error = $"No component named '{c.Selector}'";
+                    return false;
+                default:
+                    throw new InvalidOperationException("Unhandled resolution case");
             }
-            obj = matches[0].Emit();
-            if (obj is null) { error = $"Failed to instantiate '{c.Selector}'"; return false; }
         }
         doc.Objects.Add(obj, new PointF(c.X, c.Y));
         error = "";
         return true;
     }
+
+    private static string Summarize(IReadOnlyList<ObjectProxy> proxies) =>
+        string.Join(", ", proxies.Select(p => $"{p.Id} ({p.Nomen.Chapter}/{p.Nomen.Section})"));
 
     private static WireResult WireOne(int idx, WireSpec w, Dictionary<string, IDocumentObject> keyToObj)
     {

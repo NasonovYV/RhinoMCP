@@ -8,23 +8,26 @@ namespace RhMcp.Tools;
 [McpServerToolType]
 public static class GH1_SearchComponentsTool
 {
-    public record struct ProxyHit(
+    public readonly record struct ProxyHit(
         Guid Guid,
         string Name,
         string NickName,
         string Category,
         string SubCategory,
         string Kind,
-        string Description);
+        string Description,
+        bool IsObsolete,
+        bool IsHidden);
 
     [McpServerTool("g1_search_components", "Search GH1 Components", true, false)]
-    [Description("Search the Grasshopper component library by substring. Matches Name, NickName, and Description (case-insensitive). Optional exact-match category/subcategory filters. Returns up to 'limit' matches.")]
+    [Description("Search the Grasshopper component library by substring. Matches Name, NickName, and Description (case-insensitive). Optional exact-match category/subcategory filters. Excludes obsolete/hidden unless includeDeprecated. Returns up to 'limit' matches.")]
     public static string Search(
         RhinoDoc _,
         [Description("Substring to match against component Name, NickName, and Description. Case-insensitive.")] string query,
         [Description("Optional exact-match category filter (e.g. 'Maths', 'Params').")] string? category = null,
         [Description("Optional exact-match subcategory filter (e.g. 'Operators').")] string? subcategory = null,
-        [Description("Maximum number of results to return.")] int limit = 20)
+        [Description("Maximum number of results to return.")] int limit = 20,
+        [Description("Include obsolete/hidden components (e.g. legacy scripting). Default false.")] bool includeDeprecated = false)
     {
         if (string.IsNullOrEmpty(query)) return "query is required";
 
@@ -34,12 +37,13 @@ public static class GH1_SearchComponentsTool
             var d = p.Desc;
             if (category is not null && !string.Equals(d.Category, category, StringComparison.OrdinalIgnoreCase)) continue;
             if (subcategory is not null && !string.Equals(d.SubCategory, subcategory, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!includeDeprecated && GH1_ProxyResolver.IsDeprecated(p)) continue;
 
             if (!Match(d.Name, query) && !Match(d.NickName, query) && !Match(d.Description, query)) continue;
 
             string kind = GH1_Utils.ClassifyKind(p.Type);
 
-            hits.Add(new ProxyHit(p.Guid, d.Name, d.NickName, d.Category, d.SubCategory, kind, d.Description));
+            hits.Add(new ProxyHit(p.Guid, d.Name, d.NickName, d.Category, d.SubCategory, kind, d.Description, p.Obsolete, p.Exposure == GH_Exposure.hidden));
             if (hits.Count >= limit) break;
         }
 

@@ -33,7 +33,8 @@ public static class GH1_ApplyGraphTool
         [Description("Sliders to place: {Key, Min, Value, Max, Type, Name?, X, Y}. Type ∈ 'float'|'int'|'even'|'odd'.")] SliderSpec[] sliders,
         [Description("Components to place: {Key, Selector, X, Y}. Selector is a Guid (preferred — avoids name ambiguity) or component Name.")] ComponentSpec[] components,
         [Description("Wires to create: {SrcKey, Src, DstKey, Dst}. Keys must match a slider or component key above.")] WireSpec[] wires,
-        [Description("If true, trigger a new solution at the end.")] bool solve = true)
+        [Description("If true, trigger a new solution at the end.")] bool solve = true,
+        [Description("Also match obsolete/hidden components by name (a Guid always works). Default false.")] bool includeDeprecated = false)
     {
         if (!GH1_Utils.TryGetOrCreateDoc(rhDoc, out GH_Document doc))
             return "Could not get or create GH document";
@@ -71,7 +72,7 @@ public static class GH1_ApplyGraphTool
                 {
                     placeErrors.Add(new PlaceError(c.Key, "duplicate key"));
                 }
-                else if (TryPlaceComponent(doc, c, out var obj, out var err))
+                else if (TryPlaceComponent(doc, c, includeDeprecated, out var obj, out var err))
                 {
                     keyToObj[c.Key] = obj!;
                     placed.Add(new PlacedRef(c.Key, obj!.InstanceGuid, GH1_Utils.ClassifyKind(obj.GetType())));
@@ -123,7 +124,7 @@ public static class GH1_ApplyGraphTool
         return true;
     }
 
-    private static bool TryPlaceComponent(GH_Document doc, ComponentSpec c, out IGH_DocumentObject? obj, out string error)
+    private static bool TryPlaceComponent(GH_Document doc, ComponentSpec c, bool includeDeprecated, out IGH_DocumentObject? obj, out string error)
     {
         obj = null;
         if (Guid.TryParse(c.Selector, out Guid guid))
@@ -133,20 +134,24 @@ public static class GH1_ApplyGraphTool
         }
         else
         {
-            var matches = new List<IGH_ObjectProxy>();
-            foreach (IGH_ObjectProxy p in Instances.ComponentServer.ObjectProxies)
-                if (string.Equals(p.Desc.Name, c.Selector, StringComparison.OrdinalIgnoreCase))
-                    matches.Add(p);
-
-            if (matches.Count == 0) { error = $"No component named '{c.Selector}'"; return false; }
-            if (matches.Count > 1)
+            switch (GH1_ProxyResolver.Resolve(c.Selector, includeDeprecated))
             {
-                var names = string.Join(", ", matches.Select(p => $"{p.Guid} ({p.Desc.Category}/{p.Desc.SubCategory})"));
-                error = $"Component name '{c.Selector}' is ambiguous ({matches.Count} matches): {names}. Pass a Guid to disambiguate.";
-                return false;
+                case GH1_ProxyResolution.Found found:
+                    obj = found.Proxy.CreateInstance();
+                    if (obj is null) { error = $"Failed to instantiate '{c.Selector}'"; return false; }
+                    break;
+                case GH1_ProxyResolution.Ambiguous ambiguous:
+                    error = $"Component name '{c.Selector}' is ambiguous ({ambiguous.Candidates.Count} matches): {Summarize(ambiguous.Candidates)}. Pass a Guid to disambiguate.";
+                    return false;
+                case GH1_ProxyResolution.OnlyDeprecated onlyDeprecated:
+                    error = $"Only obsolete or hidden components match '{c.Selector}': {Summarize(onlyDeprecated.Candidates)}. Pass a Guid, or set includeDeprecated=true, to use one.";
+                    return false;
+                case GH1_ProxyResolution.NotFound:
+                    error = $"No component named '{c.Selector}'";
+                    return false;
+                default:
+                    throw new InvalidOperationException("Unhandled resolution case");
             }
-            obj = matches[0].CreateInstance();
-            if (obj is null) { error = $"Failed to instantiate '{c.Selector}'"; return false; }
         }
         if (obj.Attributes is null) obj.CreateAttributes();
         if (obj.Attributes is null) { error = $"Failed to create attributes for '{c.Selector}'"; return false; }
@@ -155,6 +160,9 @@ public static class GH1_ApplyGraphTool
         error = "";
         return true;
     }
+
+    private static string Summarize(IReadOnlyList<IGH_ObjectProxy> proxies) =>
+        string.Join(", ", proxies.Select(p => $"{p.Guid} ({p.Desc.Category}/{p.Desc.SubCategory})"));
 
     private static WireResult WireOne(int idx, WireSpec w, Dictionary<string, IGH_DocumentObject> keyToObj)
     {

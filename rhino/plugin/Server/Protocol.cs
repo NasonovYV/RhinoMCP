@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
@@ -232,5 +233,84 @@ internal static class McpSerializer
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         NumberHandling = JsonNumberHandling.AllowReadingFromString,
         TypeInfoResolver = new DefaultJsonTypeInfoResolver(),
+        Converters = { new LenientStringConverter(), new LenientBoolConverter(), new LenientIntConverter() },
     };
+}
+
+// Symmetric complement to AllowReadingFromString: bind a JSON number/bool to a string param (e.g. a numeric wire-selector index) instead of aborting the call.
+internal sealed class LenientStringConverter : JsonConverter<string>
+{
+    public override string? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        => reader.TokenType switch
+        {
+            JsonTokenType.String => reader.GetString(),
+            JsonTokenType.Number or JsonTokenType.True or JsonTokenType.False => RawScalarText(ref reader),
+            _ => throw new JsonException($"Cannot convert {reader.TokenType} to string."),
+        };
+
+    private static string RawScalarText(ref Utf8JsonReader reader)
+    {
+        using JsonDocument doc = JsonDocument.ParseValue(ref reader);
+        return doc.RootElement.GetRawText();
+    }
+
+    public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
+        => writer.WriteStringValue(value);
+
+    public override string ReadAsPropertyName(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        => reader.GetString()!;
+
+    public override void WriteAsPropertyName(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
+        => writer.WritePropertyName(value);
+}
+
+// Liberal at the LLM boundary: accept "true"/"false" strings as well as JSON booleans.
+internal sealed class LenientBoolConverter : JsonConverter<bool>
+{
+    public override bool Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        => reader.TokenType switch
+        {
+            JsonTokenType.True => true,
+            JsonTokenType.False => false,
+            JsonTokenType.String => FromString(reader.GetString()),
+            _ => throw new JsonException($"Cannot convert {reader.TokenType} to bool."),
+        };
+
+    public override void Write(Utf8JsonWriter writer, bool value, JsonSerializerOptions options)
+        => writer.WriteBooleanValue(value);
+
+    private static bool FromString(string? value)
+        => bool.TryParse(value, out bool b)
+            ? b
+            : throw new JsonException($"Cannot convert \"{value}\" to bool.");
+}
+
+// Liberal at the LLM boundary: accept integral decimals (3.0) and numeric strings as ints.
+internal sealed class LenientIntConverter : JsonConverter<int>
+{
+    public override int Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        => reader.TokenType switch
+        {
+            JsonTokenType.Number => FromNumber(ref reader),
+            JsonTokenType.String => FromString(reader.GetString()),
+            _ => throw new JsonException($"Cannot convert {reader.TokenType} to int."),
+        };
+
+    public override void Write(Utf8JsonWriter writer, int value, JsonSerializerOptions options)
+        => writer.WriteNumberValue(value);
+
+    private static int FromNumber(ref Utf8JsonReader reader)
+        => reader.TryGetInt32(out int i) ? i : FromDecimal(reader.GetDecimal());
+
+    private static int FromString(string? value)
+    {
+        if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int i)) return i;
+        if (decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal d)) return FromDecimal(d);
+        throw new JsonException($"Cannot convert \"{value}\" to int.");
+    }
+
+    private static int FromDecimal(decimal value)
+        => decimal.Truncate(value) == value
+            ? (int)value
+            : throw new JsonException($"Cannot convert non-integer {value} to int.");
 }

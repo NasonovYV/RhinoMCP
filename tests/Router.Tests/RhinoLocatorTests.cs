@@ -35,4 +35,14 @@ public class RhinoLocatorTests
         Assert.That(RhinoLocator.KnownVersionTokens, Does.Contain("WIP"));
         Assert.That(RhinoLocator.KnownVersionTokens, Does.Contain("8"));
     }
+
+    // WIP/BETA share Rhino 9's "9.0" folder; a literal "WIP" folder was the plugin_not_installed bug.
+    [TestCase("9", "9.0")]
+    [TestCase("WIP", "9.0")]
+    [TestCase("BETA", "9.0")]
+    [TestCase("8", "8.0")]
+    public void Maps_version_token_to_yak_packages_folder(string version, string expected)
+    {
+        Assert.That(RhinoLocator.YakPackagesFolder(version), Is.EqualTo(expected));
+    }
 }

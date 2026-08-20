@@ -254,7 +254,7 @@ internal sealed class ConnectDialog : Dialog
         if (ov == RouterEnvOverride.DefaultVersion && RhinoVersion.Token != ov.Default)
             return RhinoVersion.Token;
 
-        if (RunningRhino.SourceBuildOverride is (string envVar, string path) && ov.EnvVar == envVar)
+        if (RunningRhino.SourceBuildOverride is (string envVar, string path) && ov.EnvVars.Contains(envVar))
             return path;
 
         return string.Empty;
@@ -266,8 +266,12 @@ internal sealed class ConnectDialog : Dialog
         Dictionary<string, string> env = [];
         foreach ((RouterEnvOverride ov, TextBox field) in _fields)
         {
-            if (ov.IsSet(field.Text))
-                env[ov.EnvVar] = field.Text.Trim();
+            if (!ov.IsSet(field.Text))
+                continue;
+
+            string value = field.Text.Trim();
+            foreach (string envVar in ov.EnvVars)
+                env[envVar] = value;
         }
         return env;
     }

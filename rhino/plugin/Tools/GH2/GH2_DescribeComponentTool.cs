@@ -24,45 +24,36 @@ public static class GH2_DescribeComponentTool
         ParamInfo[] Outputs);
 
     [McpServerTool("g2_describe_component", "Describe GH2 Component", true, false)]
-    [Description("Look up a GH2 component by name and return its chapter, info, and input/output parameter list. Useful before placing or wiring components.")]
+    [Description("Look up a GH2 component by name and return its chapter, info, and input/output parameter list. Useful before placing or wiring components. Ignores obsolete/hidden unless includeDeprecated.")]
     public static string Describe(
         RhinoDoc _,
-        [Description("Component name as it appears in the component library (e.g. 'Slider', 'Addition'). Case-insensitive.")] string name)
-    {
-        ObjectProxy? proxy = null;
-        foreach (var p in ObjectProxies.Proxies)
+        [Description("Component name as it appears in the component library (e.g. 'Slider', 'Addition'). Case-insensitive.")] string name,
+        [Description("Include obsolete/hidden components (e.g. legacy scripting). Default false.")] bool includeDeprecated = false) =>
+        GH2_ProxyResolver.Resolve(name, includeDeprecated) switch
         {
-            if (string.Equals(p.Nomen.Name, name, StringComparison.OrdinalIgnoreCase))
-            {
-                proxy = p;
-                break;
-            }
-        }
-        if (proxy is null) return $"No component named '{name}' found";
+            GH2_ProxyResolution.Found found => DescribeProxy(found.Proxy),
+            GH2_ProxyResolution.Ambiguous ambiguous => JsonSerializer.Serialize(new GH2_UnresolvedResult("ambiguous", GH2_ProxyResolver.AmbiguousMessage, GH2_ProxyResolver.ToCandidates(ambiguous.Candidates))),
+            GH2_ProxyResolution.OnlyDeprecated onlyDeprecated => JsonSerializer.Serialize(new GH2_UnresolvedResult("only_deprecated", GH2_ProxyResolver.OnlyDeprecatedMessage, GH2_ProxyResolver.ToCandidates(onlyDeprecated.Candidates))),
+            GH2_ProxyResolution.NotFound => $"No component named '{name}' found",
+            _ => throw new InvalidOperationException("Unhandled resolution case"),
+        };
 
-        var obj = proxy.Emit();
-        if (obj is null) return $"Failed to instantiate '{name}'";
+    private static string DescribeProxy(ObjectProxy proxy)
+    {
+        IDocumentObject? obj = proxy.Emit();
+        if (obj is null) return $"Failed to instantiate '{proxy.Nomen.Name}'";
 
-        // Kind comes from the canonical classifier so g2_describe_component and
-        // g2_search_components agree (a NumberSliderObject is "Slider", not "Param").
-        // The switch only decides how to populate Inputs/Outputs.
+        // Kind comes from the canonical classifier so describe and search agree (a NumberSliderObject is "Slider"); the switch only fills Inputs/Outputs.
         string kind = GH2_Utils.ClassifyKind(obj.GetType());
 
-        ParamInfo[] inputs = Array.Empty<ParamInfo>();
-        ParamInfo[] outputs = Array.Empty<ParamInfo>();
-
-        switch (obj)
+        (ParamInfo[] inputs, ParamInfo[] outputs) = obj switch
         {
-            case GH2Component comp:
-                inputs = comp.Parameters.Inputs.Select(ToInfo).ToArray();
-                outputs = comp.Parameters.Outputs.Select(ToInfo).ToArray();
-                break;
-            case IParameter param:
-                inputs = [ToInfo(param)];
-                break;
-        }
+            GH2Component comp => (comp.Parameters.Inputs.Select(ToInfo).ToArray(), comp.Parameters.Outputs.Select(ToInfo).ToArray()),
+            IParameter param => ([ToInfo(param)], []),
+            _ => ([], []),
+        };
 
-        var info = new ComponentInfo(
+        ComponentInfo info = new(
             obj.Nomen.Name,
             obj.UserName ?? "",
             obj.Nomen.Info,
